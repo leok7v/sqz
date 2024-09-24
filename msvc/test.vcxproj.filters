@@ -1,0 +1,82 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="../test.c" />
+    <ClCompile Include="..\test\sqlite3.c">
+      <Filter>test</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\sqz.c">
+      <Filter>src</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\inc\sqz\sqz.h">
+      <Filter>inc\sqz</Filter>
+    </ClInclude>
+    <ClInclude Include="..\inc\rt\file.h">
+      <Filter>inc\rt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\inc\rt\rt.h">
+      <Filter>inc\rt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\inc\rt\rt_generics.h">
+      <Filter>inc\rt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\shl\sqz\sqz.h">
+      <Filter>shl\sqz</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\test\x64.elf">
+      <Filter>test</Filter>
+    </None>
+    <None Include="..\test\arm64.elf">
+      <Filter>test</Filter>
+    </None>
+    <None Include="..\shl\README.md">
+      <Filter>shl</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="test">
+      <UniqueIdentifier>{9ea4144d-a729-4320-8c2e-fd0ec7f467f6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="inc">
+      <UniqueIdentifier>{63b59eda-2fe8-4c2e-b670-ea67ab24d24e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src">
+      <UniqueIdentifier>{01b54ff3-443e-4d98-89ac-6a2316968f21}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="shl">
+      <UniqueIdentifier>{005c6817-dd19-4728-aeb2-fcbc1dfcf5fe}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="inc\rt">
+      <UniqueIdentifier>{3eb40438-b604-4f88-b7fe-8df07513df9c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="shl\sqz">
+      <UniqueIdentifier>{cef00e74-244a-4aed-b70e-6a9203a8892c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="inc\sqz">
+      <UniqueIdentifier>{5fe93bac-c83e-4a4f-ae67-ad9f2bf7383c}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="..\test\bible.txt">
+      <Filter>test</Filter>
+    </Text>
+    <Text Include="..\test\confucius.txt">
+      <Filter>test</Filter>
+    </Text>
+    <Text Include="..\test\hhgttg.txt">
+      <Filter>test</Filter>
+    </Text>
+    <Text Include="..\test\laozi.txt">
+      <Filter>test</Filter>
+    </Text>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="..\test\mandrill.png">
+      <Filter>test</Filter>
+    </Image>
+  </ItemGroup>
+</Project>
