@@ -1,7 +1,16 @@
 #ifndef rt_header_included
 #define rt_header_included
 
-// nano runtime to make debugging, life, universe and everything a bit easier
+// Copyright (c) 2024, "Leo" Dmitry Kuznetsov
+// This code and the accompanying materials are made available under the terms
+// of BSD-3 license, which accompanies this distribution. The full text of the
+// license may be found at https://opensource.org/license/bsd-3-clause
+
+// Runtime supplement to make debugging printf easier to locate in source code.
+// Defines and Implements null, rt_countof, rt_min/rt_max rt_swap,
+// rt_printf, rt_println, rt_assert, rt_swear rt_breakpoint, rt_exit.
+
+// rt_assert(bool, printf_format, ...) extended form is supported.
 
 #include <locale.h>
 #include <math.h>
@@ -13,18 +22,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #ifdef _WIN32
 #define STRICT
 #define WIN32_LEAN_AND_MEAN
 #define VC_EXTRALEAN
 #include <Windows.h>
-#else // any posix platform
-#include <unistd.h>
+#else // other (posix) platform
 #include <dirent.h>
+#include <signal.h>
+#include <unistd.h>
 #endif
 
-#ifdef _MSC_VER // cl.exe compiler:
+#ifdef _MSC_VER // overzealous /Wall in cl.exe compiler:
 #pragma warning(disable: 4710) // '...': function not inlined
 #pragma warning(disable: 4711) // function '...' selected for automatic inline expansion
 #pragma warning(disable: 4820) // '...' bytes padding added after data member '...'
@@ -34,7 +45,7 @@
 #endif
 
 #if defined(_DEBUG) && !defined(DEBUG)
-#define DEBUG // clang & gcc make use DEBUG, Microsoft _DEBUG
+#define DEBUG // clang & gcc toolchains use DEBUG, Microsoft _DEBUG
 #endif
 
 #define null ((void*)0) // like null_ptr better than NULL (0)
@@ -42,6 +53,49 @@
 #define rt_countof(a) (sizeof(a) / sizeof((a)[0]))
 
 #include "rt_generics.h"
+
+int32_t rt_exit(int exit_code);
+
+#define rt_printf(...) rt_printf_implementation(__FILE__,           \
+                       __LINE__, __func__, false, "" __VA_ARGS__)
+
+#define rt_println(...) rt_printf_implementation(__FILE__,          \
+                        __LINE__, __func__, true, "" __VA_ARGS__)
+
+int32_t rt_printf_implementation(const char* file, int32_t line,
+                                 const char* func, bool append_line_feed,
+                                 const char* format,
+                                 ...);
+
+#ifdef _WINDOWS_
+#define rt_breakpoint() (int)(DebugBreak(), 1)
+#else
+#define rt_breakpoint() raise(SIGINT)
+#endif
+
+
+#if defined(_MSC_VER)
+    #define rt_swear(b, ...) ((void)                                        \
+    ((!!(b)) || rt_printf_implementation(__FILE__, __LINE__, __func__,      \
+                         true, #b " false " __VA_ARGS__) &&                 \
+                rt_breakpoint() && rt_exit(1)))
+#else
+    #define rt_swear(b, ...) ((void)                                        \
+        ((!!(b)) || rt_printf_implementation(__FILE__, __LINE__, __func__,  \
+                         true, #b " false " __VA_ARGS__) &&                 \
+                rt_breakpoint() && rt_exit(1)))
+#endif
+
+#if defined(DEBUG) || defined(_DEBUG)
+#define rt_assert(b, ...) rt_swear(b, __VA_ARGS__)
+#else
+#define rt_assert(b, ...) ((void)(0))
+#endif
+
+
+#endif // rt_header_included
+
+#ifdef rt_implementation
 
 typedef struct rt_debug_output_s {
     char  buffer[8 * 1024];
@@ -114,30 +168,37 @@ static void rt_flush_buffer(rt_debug_output_t* out, const char* file,
 }
 
 static int32_t rt_vprintf_implementation(const char* file, int32_t line,
-                                         const char* function, bool nl,
+                                         const char* function, bool lf,
                                          const char* format, va_list args) {
     static thread_local rt_debug_output_t out;
+    enum { max_width = 1024 };
+    static_assert(rt_countof(out.buffer) < INT32_MAX, "32 bit capacity");
+    static_assert(max_width < rt_countof(out.buffer) / 2, "too big");
     if (out.rd == null || out.wr == null) {
         out.rd = out.buffer;
         out.wr = out.buffer;
     }
-    size_t space = sizeof(out.buffer) - (out.wr - out.buffer) - 4;
-    int32_t n = vsnprintf(out.wr, space, format, args);
+    size_t capacity = sizeof(out.buffer) - (out.wr - out.buffer) - 4;
+    // cannot assert here because
+    // assert(0 < capacity && capacity < INT32_MAX);
+    int32_t n = vsnprintf(out.wr, capacity, format, args);
     if (n < 0) {
         rt_output_line("printf format error\n");
     } else {
         char* p = out.wr + n - 1;
-        if (nl) {
+        if (lf) { // called from println() append line feed
             if (n == 0 || *p != '\n') { p++; *p++ = '\n'; *p++ = '\0'; n++; }
             rt_flush_buffer(&out, file, line, function);
         }
-        if (n >= (int32_t)space) {
+        if (n >= (int32_t)capacity) {
             // Handle buffer overflow
             strcpy(out.buffer + sizeof(out.buffer) - 4, "...");
             rt_flush_buffer(&out, file, line, function);
         } else {
             out.wr += n;
-            if (strchr(out.wr - n, '\n')) {
+            if (strchr(out.wr - n, '\n') != null) {
+                rt_flush_buffer(&out, file, line, function);
+            } else if ((out.wr - out.rd) >= (size_t)max_width) {
                 rt_flush_buffer(&out, file, line, function);
             }
         }
@@ -145,25 +206,38 @@ static int32_t rt_vprintf_implementation(const char* file, int32_t line,
     return n;
 }
 
-static int32_t rt_printf_implementation(const char* file, int32_t line,
-                                        const char* func, bool nl,
-                                        const char* format,
-                                        ...) {
+int32_t rt_printf_implementation(const char* file, int32_t line,
+                                 const char* func, bool line_feed,
+                                 const char* format,
+                                 ...) {
     va_list args;
     va_start(args, format);
-    int32_t result = rt_vprintf_implementation(file, line, func, nl,
+    int32_t r = rt_vprintf_implementation(file, line, func, line_feed,
                                                format, args);
     va_end(args);
-    return result;
+    return r;
 }
 
-#define rt_printf(...) rt_printf_implementation(__FILE__,           \
-                       __LINE__, __func__, false, "" __VA_ARGS__)
+#ifdef _MSC_VER
+// https://stackoverflow.com/questions/12380603/disable-warning-c4702-seems-not-work-for-vs-2012
+#pragma warning(push) // suppress does not work for a function
+#pragma warning(disable: 4702) /* unreachable code for rt_exit() function */
+#endif
 
-#define rt_println(...) rt_printf_implementation(__FILE__,          \
-                        __LINE__, __func__, true, "" __VA_ARGS__)
+int32_t rt_exit(int exit_code) {
+    #ifdef _WINDOWS_
+        ExitProcess(exit_code);
+    #else
+        exit(exit_code);
+    #endif
+    return 0;
+}
 
-/*
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+static void rt_printf_test_utf8_and_emoji(void) {
     printf("\xF0\x9F\x98\x80 Hello\xF0\x9F\x91\x8B "
            "world\xF0\x9F\x8C\x8D!\n\xF0\x9F\x98\xA1 Goodbye "
            "\xF0\x9F\x98\x88 cruel \xF0\x9F\x98\xB1 "
@@ -181,40 +255,6 @@ static int32_t rt_printf_implementation(const char* file, int32_t line,
               "\xF0\x9F\x98\x88 cruel \xF0\x9F\x98\xB1 "
               "Universe \xF0\x9F\x8C\xA0\xF0\x9F\x8C\x8C..."
               "\xF0\x9F\x92\xA4\n");
-*/
-
-#if defined(_MSC_VER)
-    #define rt_swear(b, ...) ((void)                                        \
-    ((!!(b)) || rt_printf_implementation(__FILE__, __LINE__, __func__,      \
-                         true, #b " false " __VA_ARGS__) &&                 \
-                rt_exit(1)))
-#else
-    #define rt_swear(b, ...) ((void)                                        \
-        ((!!(b)) || rt_printf_implementation(__FILE__, __LINE__, __func__,  \
-                         true, #b " false " __VA_ARGS__) &&                 \
-                    rt_exit(1)))
-#endif
-
-#if defined(DEBUG) || defined(_DEBUG)
-#define rt_assert(b, ...) rt_swear(b, __VA_ARGS__)
-#else
-#define rt_assert(b, ...) ((void)(0))
-#endif
-
-static int32_t rt_exit(int exit_code) {
-    _Pragma("warning(push)")
-    _Pragma("warning(disable: 4702)") /* unreachable code */
-    if (exit_code == 0) { rt_printf("exit code must be non-zero"); }
-    if (exit_code != 0) {
-        #ifdef _WINDOWS_
-            DebugBreak();
-            ExitProcess(exit_code);
-        #else
-            exit(exit_code);
-        #endif
-    }
-    return 0;
-    _Pragma("warning(pop)")
 }
 
-#endif // rt_header_included
+#endif // rt_implementation

@@ -46,8 +46,8 @@
     <ClInclude Include="..\inc\rt\file.h" />
     <ClInclude Include="..\inc\rt\rt.h" />
     <ClInclude Include="..\inc\rt\rt_generics.h" />
+    <ClInclude Include="..\inc\rt\unstd.h" />
     <ClInclude Include="..\inc\sqz\sqz.h" />
-    <ClInclude Include="..\shl\sqz\sqz.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="../test.c" />
@@ -66,7 +66,6 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\shl\README.md" />
     <None Include="..\test\arm64.elf" />
     <None Include="..\test\x64.elf" />
   </ItemGroup>

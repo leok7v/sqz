@@ -22,8 +22,8 @@
     <ClInclude Include="..\inc\rt\rt_generics.h">
       <Filter>inc\rt</Filter>
     </ClInclude>
-    <ClInclude Include="..\shl\sqz\sqz.h">
-      <Filter>shl\sqz</Filter>
+    <ClInclude Include="..\inc\rt\unstd.h">
+      <Filter>inc\rt</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -32,9 +32,6 @@
     </None>
     <None Include="..\test\arm64.elf">
       <Filter>test</Filter>
-    </None>
-    <None Include="..\shl\README.md">
-      <Filter>shl</Filter>
     </None>
   </ItemGroup>
   <ItemGroup>
@@ -47,14 +44,8 @@
     <Filter Include="src">
       <UniqueIdentifier>{01b54ff3-443e-4d98-89ac-6a2316968f21}</UniqueIdentifier>
     </Filter>
-    <Filter Include="shl">
-      <UniqueIdentifier>{005c6817-dd19-4728-aeb2-fcbc1dfcf5fe}</UniqueIdentifier>
-    </Filter>
     <Filter Include="inc\rt">
       <UniqueIdentifier>{3eb40438-b604-4f88-b7fe-8df07513df9c}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="shl\sqz">
-      <UniqueIdentifier>{cef00e74-244a-4aed-b70e-6a9203a8892c}</UniqueIdentifier>
     </Filter>
     <Filter Include="inc\sqz">
       <UniqueIdentifier>{5fe93bac-c83e-4a4f-ae67-ad9f2bf7383c}</UniqueIdentifier>

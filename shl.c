@@ -1,9 +1,7 @@
-#include "rt/rt.h"
-#define assert(b, ...) rt_assert(b, __VA_ARGS__)
-#define printf(...)    rt_printf(__VA_ARGS__)
-
 #include "shl/sqz/sqz.h"
+#include <assert.h>
 #include <stdio.h>
+#include <string.h>
 
 static errno_t lorem_ipsum(void) {
     const char* text = "Lorem ipsum dolor sit amet. "
@@ -12,37 +10,39 @@ static errno_t lorem_ipsum(void) {
     static uint8_t compressed[1024]; // 1KB
     uint64_t compressed_size = 0;
     {
-        struct bitstream write = { .data = compressed,
-                                   .capacity = sizeof(compressed) };
+        static struct sqz compress;
+        compress.bytes = 0;
+        compress.data = compressed;
+        compress.capacity = sizeof(compressed);
         size_t input_size = strlen(text);
         assert(sizeof(compressed) > input_size * 2);
-        sqz_write_header(&write, input_size);
-        static struct sqz compress;
-        sqz_init(&compress);
-        sqz_compress(&compress, &write, text,
+        sqz_write_header(&compress, input_size);
+        sqz_init_encoder(&compress);
+        sqz_compress(&compress, text,
                          input_size, 1u << 11); // window_bits: 11 (2KB)
         if (compress.error != 0) {
             printf("Compression error: %d\n", compress.error);
             return compress.error;
         }
-        compressed_size = write.bytes;
+        compressed_size = compress.bytes;
         printf("%d into %d bytes\n", (int)input_size, (int)compressed_size);
     }
     {
-        struct bitstream read = { .data = compressed,
-                                  .capacity = compressed_size };
-        uint64_t decompressed = 0;
-        sqz_read_header(&read, &decompressed);
         static char decompressed_data[1024];
-        assert(sizeof(decompressed_data) > decompressed * 2);
         static struct sqz decompress;
-        sqz_init(&decompress);
+        decompress.bytes = 0;
+        decompress.data = decompressed_data;
+        decompress.capacity = sizeof(decompressed_data);
+        uint64_t decompressed = 0;
+        sqz_read_header(&decompress, &decompressed);
+        assert(sizeof(decompressed_data) > decompressed * 2);
+        sqz_init_decoder(&decompress);
         if (decompressed != strlen(text)) {
             printf("Decompressed size does not match original size\n");
             return EINVAL;
         }
-        sqz_decompress(&decompress, &read, decompressed_data,
-                                       (size_t)decompressed);
+        sqz_decompress(&decompress, decompressed_data,
+                                    (size_t)decompressed);
         if (decompress.error != 0) {
             printf("Decompression error: %d\n", decompress.error);
             return decompress.error;

@@ -14,607 +14,301 @@
 #endif
 #include <math.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
-enum {
-    sqz_deflate_sym_min  = 257, // minimum literal for length base
-    sqz_deflate_pos_max  = 29,  // maximum pos base index
-    sqz_deflate_len_min  = 3,
-    // value is the same but unrelated to sqz_deflate_sym_min:
-    sqz_deflate_len_max  = 257,
-};
-
-#ifndef null
-#define null ((void*)0) // like null_ptr a bit better than NULL (0)
-#endif
+static_assert(sizeof(int) >= 4, "32 bits minimum");
 
 #ifndef countof
 #define countof(a) (sizeof(a) / sizeof((a)[0]))
 #endif
 
-static inline void bitstream_write_bit(struct bitstream* bs, int bit) {
-    if (bs->error == 0) {
-        bs->b64 <<= 1;
-        bs->b64 |= (bit & 1);
-        bs->bits++;
-        if (bs->bits == 64) {
-            if (bs->data != null) {
-                if (bs->bytes + 8 > bs->capacity) {
-                    bs->error = E2BIG;
-                } else {
-                    memcpy(bs->data + bs->bytes, &bs->b64, 8);
-                }
-            } else {
-                bs->error = bs->write64(bs);
-            }
-            if (bs->error == 0) { bs->bytes += 8; }
-            bs->bits = 0;
-            bs->b64 = 0;
+static inline int sqz_bytes_of(int i) {
+    assert(i < (1u << 24));
+    return (i & 0x00FF0000) ? 3 :
+           (i & 0x0000FF00) ? 2 : 1;
+}
+
+static inline int32_t ft_lsb(int32_t i) { // least significant bit only
+    return i & (~i + 1); // (i & -i)
+}
+
+static void ft_init(uint64_t tree[], size_t n, uint64_t a[]) {
+    const int32_t m = (int32_t)n;
+    for (int32_t i = 0; i <  m; i++) { tree[i] = a[i]; }
+    for (int32_t i = 1; i <= m; i++) {
+        int32_t parent = i + ft_lsb(i);
+        if (parent <= m) {
+            tree[parent - 1] += tree[i - 1];
         }
     }
 }
 
-static inline void bitstream_write_bits(struct bitstream* bs,
-                                        uint64_t data, int32_t bits) {
-    while (bits > 0 && bs->error == 0) {
-        bitstream_write_bit(bs, data & 1);
-        bits--;
-        data >>= 1;
+static void ft_update(uint64_t tree[], size_t n, int32_t i, uint64_t inc) {
+    while (i < (int32_t)n) {
+        tree[i] += inc;
+        i += ft_lsb(i + 1);
     }
 }
 
-static inline int bitstream_read_bit(struct bitstream* bs) {
-    int bit = 0;
-    if (bs->error == 0) {
-        if (bs->bits == 0) {
-            bs->b64 = 0;
-            if (bs->data != null) {
-                if (bs->bytes + 8 > bs->capacity) {
-                    bs->error = E2BIG;
-                } else {
-                    memcpy(&bs->b64, bs->data + bs->bytes, 8);
-                }
-            } else {
-                bs->error = bs->read64(bs);
-            }
-            if (bs->error == 0) { bs->bytes += 8; }
-            bs->bits = 64;
+static uint64_t ft_query(const uint64_t tree[], size_t n, int32_t i) {
+    uint64_t sum = 0;
+    while (i >= 0) {
+        if (i < (int32_t)n) {
+            sum += tree[i];
         }
-        bit = ((int64_t)bs->b64) < 0; // same as (bs->b64 >> 63) & 1;
-        bs->b64 <<= 1;
-        bs->bits--;
+        i -= ft_lsb(i + 1);
     }
-    return bit;
+    return sum;
 }
 
-static inline uint64_t bitstream_read_bits(struct bitstream* bs, int32_t bits) {
-    uint64_t data = 0;
-    for (int32_t b = 0; b < bits && bs->error == 0; b++) {
-        int bit = bitstream_read_bit(bs);
-        if (bit) { data |= ((uint64_t)bit) << b; }
-    }
-    return data;
-}
-
-static inline void bitstream_flush(struct bitstream* bs) {
-    while (bs->bits > 0 && bs->error == 0) { bitstream_write_bit(bs, 0); }
-}
-
-// Huffman Adaptive Coding https://en.wikipedia.org/wiki/Adaptive_Huffman_coding
-
-static void huffman_update_paths(struct huffman* t, int32_t i) {
-    t->stats.updates++;
-    const int32_t m = t->n * 2 - 1;
-    if (i == m - 1) { t->depth = 0; } // root
-    const int32_t  bits = t->node[i].bits;
-    const uint64_t path = t->node[i].path;
-    const int32_t lix = t->node[i].lix;
-    const int32_t rix = t->node[i].rix;
-    if (lix != -1) {
-        t->node[lix].bits = bits + 1;
-        t->node[lix].path = path;
-        huffman_update_paths(t, lix);
-    }
-    if (rix != -1) {
-        t->node[rix].bits = bits + 1;
-        t->node[rix].path = path | (1ULL << bits);
-        huffman_update_paths(t, rix);
-    }
-    if (bits > t->depth) { t->depth = bits; }
-}
-
-static inline int32_t huffman_swap_siblings(struct huffman* t,
-                                            const int32_t i) {
-    const int32_t m = t->n * 2 - 1;
-    if (i < m - 1) { // not root
-        const int32_t pix = t->node[i].pix;
-        const int32_t lix = t->node[pix].lix;
-        const int32_t rix = t->node[pix].rix;
-        if (lix >= 0 && rix >= 0) {
-            if (t->node[lix].freq > t->node[rix].freq) { // swap
-                t->stats.swaps++;
-                t->node[pix].lix = rix;
-                t->node[pix].rix = lix;
-                // because swap changed all path below:
-                huffman_update_paths(t, pix);
-                return i == lix ? rix : lix;
-            }
+static int32_t ft_index_of(uint64_t tree[], size_t n, uint64_t const sum) {
+    if (sum >= tree[n - 1]) { return -1; }
+    uint64_t value = sum;
+    uint32_t i = 0;
+    uint32_t mask = (uint32_t)(n >> 1);
+    while (mask != 0) {
+        uint32_t t = i + mask;
+        if (t <= n && value >= tree[t - 1]) {
+            i = t;
+            value -= tree[t - 1];
         }
+        mask >>= 1;
     }
-    return i;
+    return i == 0 && value < sum ? -1 : (int32_t)(i - 1);
 }
 
-static inline void huffman_frequency_changed(struct huffman* t, int32_t i);
-
-static inline void huffman_update_freq(struct huffman* t, int32_t i) {
-    const int32_t lix = t->node[i].lix;
-    const int32_t rix = t->node[i].rix;
-    t->node[i].freq = (lix >= 0 ? t->node[lix].freq : 0) +
-                      (rix >= 0 ? t->node[rix].freq : 0);
+static inline uint64_t pm_sum_of(struct prob_model* pm, uint32_t sym) {
+    return ft_query(pm->tree, countof(pm->tree), sym - 1);
 }
 
-static inline void huffman_move_up(struct huffman* t, int32_t i) {
-    const int32_t pix = t->node[i].pix; // parent
-    const int32_t gix = t->node[pix].pix; // grandparent
-    // Is parent grandparent`s left or right child?
-    const bool parent_is_left_child = pix == t->node[gix].lix;
-    const int32_t psx = parent_is_left_child ? // parent sibling index
-        t->node[gix].rix : t->node[gix].lix;   // aka auntie/uncle
-    if (t->node[i].freq > t->node[psx].freq) {
-        // Move grandparents left or right subtree to be
-        // parents right child instead of 'i'.
-        t->stats.moves++;
-        t->node[i].pix = gix;
-        if (parent_is_left_child) {
-            t->node[gix].rix = i;
-        } else {
-            t->node[gix].lix = i;
-        }
-        t->node[pix].rix = psx;
-        t->node[psx].pix = pix;
-        huffman_update_freq(t, pix);
-        huffman_update_freq(t, gix);
-        huffman_swap_siblings(t, i);
-        huffman_swap_siblings(t, psx);
-        huffman_swap_siblings(t, pix);
-        huffman_update_paths(t, gix);
-        huffman_frequency_changed(t, gix);
+static inline uint64_t pm_total_freq(struct prob_model* pm) {
+    return pm->tree[countof(pm->tree) - 1];
+}
+
+static inline int32_t pm_index_of(struct prob_model* pm, uint64_t sum) {
+    return ft_index_of(pm->tree, countof(pm->tree), sum) + 1;
+}
+
+void pm_init(struct prob_model* pm, uint32_t n) {
+    for (size_t i = 0; i < countof(pm->freq); i++) {
+        pm->freq[i] = i < n ? 1 : 0;
+    }
+    ft_init(pm->tree, countof(pm->tree), pm->freq);
+}
+
+void pm_update(struct prob_model* pm, uint8_t sym, uint64_t inc) {
+    const uint64_t pm_max_freq = (1uLL << (64 - 8));
+    if (pm->tree[countof(pm->tree) - 1] < pm_max_freq) {
+        pm->freq[sym] += inc;
+        ft_update(pm->tree, countof(pm->tree), sym, inc);
     }
 }
 
-static inline void huffman_frequency_changed(struct huffman* t, int32_t i) {
-    const int32_t m = t->n * 2 - 1; (void)m;
-    const int32_t pix = t->node[i].pix;
-    if (pix == -1) { // `i` is root
-        huffman_update_freq(t, i);
-        i = huffman_swap_siblings(t, i);
-    } else {
-        huffman_update_freq(t, pix);
-        i = huffman_swap_siblings(t, i);
-        huffman_frequency_changed(t, pix);
-    }
-    if (pix != -1 && t->node[pix].pix != -1 && i == t->node[pix].rix) {
-        huffman_move_up(t, i);
+static void rc_emit(struct range_coder* rc) {
+    const uint8_t byte = (uint8_t)(rc->low >> 56);
+    rc->write(rc, byte);
+    rc->low   <<= 8;
+    rc->range <<= 8;
+}
+
+static inline bool rc_leftmost_byte_is_same(struct range_coder* rc) {
+    return (rc->low >> 56) == ((rc->low + rc->range) >> 56);
+}
+
+void rc_init(struct range_coder* rc, uint64_t code) {
+    rc->low   = 0;
+    rc->range = UINT64_MAX;
+    rc->code  = code;
+    rc->error = 0;
+}
+
+static void rc_flush(struct range_coder* rc) {
+    for (int i = 0; i < sizeof(rc->low); i++) {
+        rc->range = UINT64_MAX;
+        rc_emit(rc);
     }
 }
 
-static bool huffman_insert(struct huffman* t, int32_t i) {
-    bool done = true;
-    const int32_t root = t->n * 2 - 1 - 1;
-    int32_t ipx = root;
-    t->node[i].freq = 1;
-    while (ipx >= t->n) {
-        if (t->node[ipx].rix == -1) {
-            t->node[ipx].rix = i;
-            t->node[i].pix = ipx;
-            break;
-        } else if (t->node[ipx].lix == -1) {
-            t->node[ipx].lix = i;
-            t->node[i].pix = ipx;
-            break;
-        } else {
-            ipx = t->node[ipx].lix;
-        }
-    }
-    if (ipx >= t->n) { // not a leaf, inserted
-        t->node[ipx].freq++;
-        i = huffman_swap_siblings(t, i);
-    } else { // leaf
-        if (t->next == t->n) {
-            done = false; // cannot insert
-            t->complete = true;
-        } else {
-            t->next--;
-            int32_t nix = t->next;
-            t->node[nix] = (struct huffman_node){
-                .freq = t->node[ipx].freq,
-                .lix = ipx,
-                .rix = -1,
-                .pix = t->node[ipx].pix,
-                .bits = t->node[ipx].bits,
-                .path = t->node[ipx].path
-            };
-            if (t->node[ipx].pix != -1) {
-                if (t->node[t->node[ipx].pix].lix == ipx) {
-                    t->node[t->node[ipx].pix].lix = nix;
-                } else {
-                    t->node[t->node[ipx].pix].rix = nix;
-                }
-            }
-            t->node[ipx].pix = nix;
-            t->node[ipx].bits++;
-            t->node[ipx].path = t->node[nix].path;
-            t->node[nix].rix = i;
-            t->node[i].pix = nix;
-            t->node[i].bits = t->node[nix].bits + 1;
-            t->node[i].path = t->node[nix].path | (1ULL << t->node[nix].bits);
-            huffman_update_freq(t, nix);
-            ipx = nix;
-        }
-    }
-    huffman_frequency_changed(t, i);
-    huffman_update_paths(t, ipx);
-    return done;
+static void rc_consume(struct range_coder* rc) {
+    const uint8_t byte   = rc->read(rc);
+    rc->code    = (rc->code << 8) + byte;
+    rc->low   <<= 8;
+    rc->range <<= 8;
 }
 
-static inline bool huffman_inc_frequency(struct huffman* t, int32_t i) {
-    bool done = true;
-    if (t->node[i].pix == -1) {
-        done = huffman_insert(t, i); // Unseen terminal node.
-    } else if (!t->complete && t->depth < 63 && t->node[i].freq < UINT64_MAX - 1) {
-        t->node[i].freq++;
-        huffman_frequency_changed(t, i);
-    } else {
-        // ignore future frequency updates
-        t->complete = 1;
-        done = false;
-    }
-    return done;
-}
-
-static inline void huffman_init(struct huffman* t,
-                                struct huffman_node nodes[],
-                                const size_t count) {
-    // `count` must pow(2, bits_per_symbol) * 2 - 1
-    assert(7 <= count && count < INT32_MAX);
-    const int32_t n = (int32_t)(count + 1) / 2;
-    assert(n > 4 && (n & (n - 1)) == 0); // must be power of 2
-    memset(&t->stats, 0x00, sizeof(t->stats));
-    t->node = nodes;
-    t->n = n;
-    const int32_t root = n * 2 - 1;
-    t->next = root - 1; // next non-terminal node
-    t->depth = 0;
-    t->complete = 0;
-    for (size_t i = 0; i < count; i++) {
-        t->node[i] = (struct huffman_node){
-            .freq = 0, .pix = -1, .lix = -1, .rix = -1, .bits = 0, .path = 0
-        };
+static void rc_encode(struct range_coder* rc, struct prob_model* pm,
+               uint8_t sym) {
+    uint64_t total = pm_total_freq(pm);
+    uint64_t start = pm_sum_of(pm, sym);
+    uint64_t size  = pm->freq[sym];
+    rc->range /= total;
+    rc->low   += start * rc->range;
+    rc->range *= size;
+    pm_update(pm, sym, 1);
+    while (rc_leftmost_byte_is_same(rc)) { rc_emit(rc); }
+    if (rc->range < total + 1) {
+        rc_emit(rc);
+        rc_emit(rc);
+        rc->range = UINT64_MAX - rc->low;
     }
 }
 
-// Deflate https://en.wikipedia.org/wiki/Deflate
+static uint8_t rc_err(struct range_coder* rc, int32_t e) {
+    rc->error = e;
+    return 0;
+}
 
-static const uint16_t sqz_len_base[29] = {
-    3, 4, 5, 6, 7, 8, 9, 10, // 257-264
-    11, 13, 15, 17,          // 265-268
-    19, 23, 27, 31,          // 269-272
-    35, 43, 51, 59,          // 273-276
-    67, 83, 99, 115,         // 277-280
-    131, 163, 195, 227, 258  // 281-285
-};
-
-static const uint8_t sqz_len_xb[29] = { // extra bits
-    0, 0, 0, 0, 0, 0, 0, 0, // 257-264
-    1, 1, 1, 1,             // 265-268
-    2, 2, 2, 2,             // 269-272
-    3, 3, 3, 3,             // 273-276
-    4, 4, 4, 4,             // 277-280
-    5, 5, 5, 5, 0           // 281-285 (len = 258 has no extra bits)
-};
-
-static const uint16_t sqz_pos_base[30] = {
-    1, 2, 3, 4,  // 0-3
-    5, 7,        // 4-5
-    9, 13,       // 6-7
-    17, 25,      // 8-9
-    33, 49,      // 10-11
-    65, 97,      // 12-13
-    129, 193,    // 14-15
-    257, 385,    // 16-17
-    513, 769,    // 18-19
-    1025, 1537,  // 20-21
-    2049, 3073,  // 22-23
-    4097, 6145,  // 24-25
-    8193, 12289, // 26-27
-    16385, 24577 // 28-29
-};
-
-static const uint8_t sqz_pos_xb[30] = { // extra bits
-    0, 0, 0, 0, // 0-3
-    1, 1,       // 4-5
-    2, 2,       // 6-7
-    3, 3,       // 8-9
-    4, 4,       // 10-11
-    5, 5,       // 12-13
-    6, 6,       // 14-15
-    7, 7,       // 16-17
-    8, 8,       // 18-19
-    9, 9,       // 20-21
-    10, 10,     // 22-23
-    11, 11,     // 24-25
-    12, 12,     // 26-27
-    13, 13      // 28-29
-};
-
-static void sqz_deflate_init(struct sqz* s) {
-    uint8_t  j = 0;
-    uint16_t n = sqz_len_base[j] + (1u << sqz_len_xb[j]);
-    for (int16_t i = 3; i < countof(s->len_index); i++) {
-        if (i == n) {
-            j++;
-            n = sqz_len_base[j] + (1u << sqz_len_xb[j]);
-        }
-        s->len_index[i] = j;
+static uint8_t rc_decode(struct range_coder* rc, struct prob_model* pm) {
+    uint64_t total = pm_total_freq(pm);
+    if (total < 1) { return rc_err(rc, sqz_err_invalid); }
+    if (rc->range < total) {
+        rc_consume(rc);
+        rc_consume(rc);
+        rc->range = UINT64_MAX - rc->low;
     }
-    j = 0;
-    n = sqz_pos_base[j] + (1u << sqz_pos_xb[j]);
-    for (int32_t i = 0; i < countof(s->pos_index); i++) {
-        if (i == n) {
-            j++;
-            n = sqz_pos_base[j] + (1u << sqz_pos_xb[j]);
-        }
-        s->pos_index[i] = j;
-    }
+    uint64_t sum   = (rc->code - rc->low) / (rc->range / total);
+    int32_t  sym   = pm_index_of(pm, sum);
+    if (sym < 0 || pm->freq[sym] == 0) { return rc_err(rc, sqz_err_data); }
+    uint64_t start = pm_sum_of(pm, sym);
+    uint64_t size  = pm->freq[sym];
+    if (size == 0 || rc->range < total) { return rc_err(rc, sqz_err_data); }
+    rc->range /= total;
+    rc->low   += start * rc->range;
+    rc->range *= size;
+    pm_update(pm, (uint8_t)sym, 1);
+    while (rc_leftmost_byte_is_same(rc)) { rc_consume(rc); }
+    return (uint8_t)sym;
 }
 
 void sqz_init(struct sqz* s) {
-    s->error = 0;
-    huffman_init(&s->lit, s->lit_nodes, countof(s->lit_nodes));
-    huffman_init(&s->pos, s->pos_nodes, countof(s->pos_nodes));
+    rc_init(&s->rc, 0);
+    pm_init(&s->pm_size, 256);
+    pm_init(&s->pm_byte, 256);
+    pm_init(&s->pm_dist, 4);
+    pm_init(&s->pm_dist1, 256);
+    pm_init(&s->pm_dist2[0], 256);
+    pm_init(&s->pm_dist2[1], 256);
+    pm_init(&s->pm_dist3[0], 256);
+    pm_init(&s->pm_dist3[1], 256);
+    pm_init(&s->pm_dist3[2], 256);
 }
 
-static inline void sqz_write_bit(struct sqz* s, bool bit) {
-    if (s->error == 0) {
-        bitstream_write_bit(s->bs, bit);
-        s->error = s->bs->error;
+enum { sqz_min_len =   3 };
+enum { sqz_max_len = 254 };
+
+void sqz_compress(struct sqz* s, const void* memory, uint64_t bytes,
+                  uint16_t window) {
+    if (bytes > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
+        s->rc.error = sqz_err_too_big;
     }
-}
-
-static inline void sqz_write_bits(struct sqz* s,
-                                      uint64_t b64, uint8_t bits) {
-    if (s->error == 0) {
-        bitstream_write_bits(s->bs, b64, bits);
-        s->error = s->bs->error;
-    }
-}
-
-static inline void sqz_write_huffman(struct sqz* s, struct huffman* t,
-                                         int32_t i) {
-    sqz_write_bits(s, t->node[i].path, (uint8_t)t->node[i].bits);
-    (void)huffman_inc_frequency(t, i); // after the path is written
-    // (void) because inability to update frequency is OK here
-}
-
-static inline void sqz_flush(struct sqz* s) {
-    if (s->error == 0) {
-        bitstream_flush(s->bs);
-        s->error = s->bs->error;
-    }
-}
-
-void sqz_write_header(struct bitstream* bs, uint64_t bytes) {
-    bitstream_write_bits(bs, (uint64_t)bytes, sizeof(uint64_t) * 8);
-}
-
-enum { // "nyt" stands for Not Yet Transmitted (see Vitter Algorithm)
-    sqz_lit_nyt = sqz_deflate_sym_max + 1,
-    sqz_pos_nyt = sqz_deflate_pos_max + 1
-};
-
-static inline void sqz_encode_literal(struct sqz* s, uint16_t lit) {
-    if (s->lit.node[lit].bits == 0) {
-        sqz_write_huffman(s, &s->lit, sqz_lit_nyt);
-        sqz_write_bits(s, lit, 9);
-        if (!huffman_insert(&s->lit, lit)) { s->error = E2BIG; }
-    } else {
-        sqz_write_huffman(s, &s->lit, lit);
-    }
-}
-
-static inline void sqz_encode_len(struct sqz* s, uint16_t len) {
-    const uint8_t  i = s->len_index[len];
-    const uint16_t b = sqz_len_base[i];
-    const uint8_t  x = sqz_len_xb[i];
-    const uint16_t c = sqz_deflate_sym_min + i; // length code
-    sqz_encode_literal(s, c);
-    if (x > 0) { sqz_write_bits(s, (len - b), x); }
-}
-
-static inline void sqz_encode_pos(struct sqz* s, uint16_t pos) {
-    const uint8_t  i = s->pos_index[pos];
-    const uint16_t b = sqz_pos_base[i];
-    const uint8_t  x = sqz_pos_xb[i];
-    if (s->pos.node[i].bits == 0) {
-        sqz_write_huffman(s, &s->pos, sqz_pos_nyt);
-        sqz_write_bits(s, i, 5); // 0..29
-        if (!huffman_insert(&s->pos, i)) { s->error = E2BIG; }
-    } else {
-        sqz_write_huffman(s, &s->pos, i);
-    }
-    if (x > 0) {
-        sqz_write_bits(s, (pos - b), x);
-    }
-}
-
-void sqz_compress(struct sqz* s, struct bitstream* bs,
-                      const void* memory, size_t bytes,
-                      uint16_t window) {
-    const uint8_t* data = (const uint8_t*)memory;
-    s->bs = bs;
-    if (!huffman_insert(&s->lit, sqz_lit_nyt)) { s->error = EINVAL; }
-    if (!huffman_insert(&s->pos, sqz_pos_nyt)) { s->error = EINVAL; }
-    sqz_deflate_init(s);
-    size_t i = 0;
-    while (i < bytes && s->error == 0) {
-        size_t len = 0;
-        size_t pos = 0;
+    const uint8_t* d = (const uint8_t*)memory;
+    uint64_t i = 0;
+    while (i < bytes && s->rc.error == 0) {
+        size_t size = 0;
+        size_t dist = 0;
         // https://en.wikipedia.org/wiki/LZ77_and_LZ78
-        if (i >= sqz_deflate_len_min) {
+        if (i >= sqz_min_len) {
             size_t j = i - 1;
             size_t min_j = i >= window ? i - window + 1 : 0;
             for (;;) {
                 const size_t n = bytes - i;
                 size_t k = 0;
-                while (k < n && data[j + k] == data[i + k] &&
-                       k < sqz_deflate_len_max) {
+                while (k < n && d[j + k] == d[i + k] && k < sqz_max_len) {
                     k++;
                 }
-                if (k >= sqz_deflate_len_min && k > len) {
-                    len = k;
-                    pos = i - j;
-                    if (len == sqz_deflate_len_max) { break; }
+                if (k >= sqz_min_len && k > size) {
+                    size = k;
+                    dist = i - j;
+                    if (size == sqz_max_len) { break; }
                 }
                 if (j == min_j) { break; }
                 j--;
             }
         }
-        if (len >= sqz_deflate_len_min) {
-            sqz_encode_len(s, (uint16_t)len);
-            sqz_encode_pos(s, (uint16_t)pos);
-            i += len;
-        } else {
-            uint16_t b = data[i];
-            sqz_encode_literal(s, b);
-            i++;
-        }
-    }
-    sqz_flush(s);
-}
-
-static inline uint64_t sqz_read_bit(struct sqz* s) {
-    int bit = 0;
-    if (s->error == 0) {
-        bit = bitstream_read_bit(s->bs);
-        s->error = s->bs->error;
-    }
-    return bit;
-}
-
-static inline uint64_t sqz_read_bits(struct sqz* s, uint32_t n) {
-    uint64_t bits = 0;
-    if (s->error == 0) {
-        bits = bitstream_read_bits(s->bs, n);
-    }
-    return bits;
-}
-
-static inline uint64_t sqz_read_huffman(struct sqz* s, struct huffman* t) {
-    const int32_t m = t->n * 2 - 1;
-    int32_t i = m - 1; // root
-    int bit = (int)sqz_read_bit(s);
-    while (s->error == 0) {
-        i = bit ? t->node[i].rix : t->node[i].lix;
-        if (t->node[i].lix < 0 && t->node[i].rix < 0) { break; } // leaf
-        bit = (int)sqz_read_bit(s);
-    }
-    // (void) because inability to update frequency is OK here:
-    if (s->error == 0) { (void)huffman_inc_frequency(t, i); }
-    return (uint64_t)i;
-}
-
-void sqz_read_header(struct bitstream* bs, uint64_t *bytes) {
-    uint64_t b = bitstream_read_bits(bs, sizeof(uint64_t) * 8);
-    if (bs->error == 0) { *bytes = b; }
-}
-
-static uint16_t sqz_read_length(struct sqz* s, uint16_t lit) {
-    const uint8_t base = (uint8_t)(lit - sqz_deflate_sym_min);
-    if (base >= countof(sqz_len_base)) {
-        s->error = EINVAL;
-        return 0;
-    } else {
-        const uint8_t bits = sqz_len_xb[base];
-        if (bits != 0) {
-            uint64_t extra = sqz_read_bits(s, bits);
-            return s->error == 0 ?
-                (uint16_t)sqz_len_base[base] + (uint16_t)extra : 0;
-        } else {
-            return sqz_len_base[base];
-        }
-    }
-}
-
-static uint32_t sqz_read_pos(struct sqz* s) {
-    uint32_t pos = 0;
-    uint64_t base = sqz_read_huffman(s, &s->pos);
-    if (s->error == 0 && base == sqz_pos_nyt) {
-        base = sqz_read_bits(s, 5);
-        if (s->error == 0) {
-            if (!huffman_insert(&s->pos, (int32_t)base)) {
-                s->error = E2BIG;
-            }
-        }
-    }
-    if (s->error == 0 && base >= countof(sqz_pos_base)) {
-        s->error = EINVAL;
-    } else {
-        pos = sqz_pos_base[base];
-    }
-    if (s->error == 0) {
-        uint8_t bits  = sqz_pos_xb[base];
-        if (bits > 0) {
-            uint64_t extra = sqz_read_bits(s, bits);
-            if (s->error == 0) { pos += (uint32_t)extra; }
-        }
-    }
-    return pos;
-}
-
-void sqz_decompress(struct sqz* s, struct bitstream* bs,
-                        void* memory, size_t bytes) {
-    uint8_t* data = (uint8_t*)memory;
-    s->bs = bs;
-    if (!huffman_insert(&s->lit, sqz_lit_nyt)) { s->error = EINVAL; }
-    if (!huffman_insert(&s->pos, sqz_pos_nyt)) { s->error = EINVAL; }
-    sqz_deflate_init(s);
-    size_t i = 0; // output b64[i]
-    while (i < bytes && s->error == 0) {
-        uint64_t lit = sqz_read_huffman(s, &s->lit);
-        if (s->error != 0) { break; }
-        if (lit == sqz_lit_nyt) {
-            lit = sqz_read_bits(s, 9);
-            if (s->error != 0) { break; }
-            if (!huffman_insert(&s->lit, (int32_t)lit)) {
-                s->error = E2BIG;
-                break;
-            }
-        }
-        if (lit <= 0xFF) {
-            data[i] = (uint8_t)lit;
-            i++;
-        } else {
-            if (sqz_deflate_sym_min <= lit && lit <= sqz_lit_nyt) {
-                uint32_t len = sqz_read_length(s, (uint16_t)lit);
-                if (s->error != 0) { break; }
-                if (sqz_deflate_len_min <= len && len <= sqz_deflate_len_max) {
-                    uint32_t pos = sqz_read_pos(s);
-                    if (s->error != 0) { break; }
-                    if (0 < pos && pos <= sqz_deflate_distance) {
-                        // memcpy() cannot be used on overlapped regions
-                        // because it may read more than one byte at a time.
-                        uint8_t* d = data - (size_t)pos;
-                        const size_t n = i + (size_t)len;
-                        while (i < n) { data[i] = d[i]; i++; }
-                    } else {
-                        s->error = EINVAL;
-                    }
-                } else {
-                    s->error = EINVAL;
-                }
+        if (size >= sqz_min_len) {
+            printf("[%d,%d]", (int)size, (int)dist);
+            rc_encode(&s->rc, &s->pm_size, (uint8_t)size);
+            assert(sqz_min_len <= dist && dist < (1u << 24));
+            int bc = sqz_bytes_of((uint32_t)dist); // byte count
+            rc_encode(&s->rc, &s->pm_dist, (uint8_t)(bc - 1));
+            if (bc == 1) {
+                rc_encode(&s->rc, &s->pm_dist1, (uint8_t)dist);
+            } else if (bc == 2) {
+                rc_encode(&s->rc, &s->pm_dist2[0], (uint8_t)(dist));
+                rc_encode(&s->rc, &s->pm_dist2[1], (uint8_t)(dist >> 8));
+            } else if (bc == 3) {
+                rc_encode(&s->rc, &s->pm_dist3[0], (uint8_t)(dist));
+                rc_encode(&s->rc, &s->pm_dist3[1], (uint8_t)(dist >> 8));
+                rc_encode(&s->rc, &s->pm_dist3[2], (uint8_t)(dist >> 16));
             } else {
-                s->error = EINVAL;
+                assert(false);
+            }
+            i += size;
+        } else {
+            rc_encode(&s->rc, &s->pm_size, 0);
+            rc_encode(&s->rc, &s->pm_byte, d[i]);
+            printf("%c", d[i]);
+            i++;
+        }
+    }
+    printf("\n");
+    static_assert(sqz_min_len < 0xFF);
+    rc_encode(&s->rc, &s->pm_size, 0xFF);
+    rc_flush(&s->rc);
+}
+
+uint64_t sqz_decompress(struct sqz* s, void* data, uint64_t bytes) {
+    s->rc.code = 0;  // read first 8 bytes
+    for (size_t i = 0; i < sizeof(s->rc.code); i++) {
+        s->rc.code = (s->rc.code << 8) + s->rc.read(&s->rc);
+    }
+    uint8_t* d = (uint8_t*)data;
+    size_t i = 0;
+    while (s->rc.error == 0) {
+        uint8_t size = rc_decode(&s->rc, &s->pm_size);
+        if (s->rc.error != 0) { break; }
+        if (size == 0xFF) {
+            break;
+        } else if (size == 0) {
+            if (i < bytes) {
+                d[i++] = rc_decode(&s->rc, &s->pm_byte);
+            } else {
+                s->rc.error = sqz_err_no_space;
+            }
+        } else if (size < sqz_min_len || size > sqz_max_len) {
+            s->rc.error = sqz_err_range;
+        } else {
+            uint8_t bc = rc_decode(&s->rc, &s->pm_dist); // byte count - 1
+            if (s->rc.error != 0) { break; }
+            uint32_t dist = 0;
+            if (bc == 0) {
+                dist = rc_decode(&s->rc, &s->pm_dist1);
+            } else if (bc == 1) {
+                dist  =            rc_decode(&s->rc, &s->pm_dist2[0]);
+                dist |= ((uint32_t)rc_decode(&s->rc, &s->pm_dist2[1])) << 8;
+            } else if (bc == 2) {
+                dist  =            rc_decode(&s->rc, &s->pm_dist3[0]);
+                dist |= ((uint32_t)rc_decode(&s->rc, &s->pm_dist3[1])) << 8;
+                dist |= ((uint32_t)rc_decode(&s->rc, &s->pm_dist3[2])) << 16;
+            } else {
+                assert(false);
+                s->rc.error = sqz_err_data;
+            }
+            if (s->rc.error == 0) {
+                const size_t n = i + size;
+                if (i < dist) {
+                    s->rc.error = sqz_err_range;
+                } else if (i >= dist && n < bytes) {
+                    // memcpy() cannot be used on overlapped regions
+                    // because it may read more than one byte at a time.
+                    uint8_t* p = d - (size_t)dist;
+                    while (i < n) { d[i] = p[i]; i++; }
+                } else {
+                    s->rc.error = sqz_err_no_space;
+                }
             }
         }
     }
+    return i;
 }

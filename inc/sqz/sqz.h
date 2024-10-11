@@ -1,75 +1,62 @@
 #ifndef sqz_h
 #define sqz_h
 
-#include <errno.h>
+#include <stddef.h>
 #include <stdint.h>
 
 enum {
-    sqz_deflate_sym_max   = 284, // maximum literal for length base
-    sqz_deflate_distance  = 0x7FFF // maximum position distance
-};
-
-enum {
     sqz_min_win_bits  =  10,
-    sqz_max_win_bits  =  15,
+    sqz_max_win_bits  =  15
 };
 
-struct huffman_node {
-    uint64_t freq;
-    uint64_t path;
-    int32_t  bits; // least significant root turn
-    int32_t  pix;  // parent
-    int32_t  lix;  // left
-    int32_t  rix;  // right
+// See: posix errno.h https://pubs.opengroup.org/onlinepubs/9699919799/
+// Range coder errors can be any values != 0 but for the convenience
+// of debugging (e.g. strerror()) and testing de facto
+// errno_t values are used.
+
+#define sqz_err_io            5 // EIO   : I/O error
+#define sqz_err_too_big       7 // E2BIG : Argument list too long
+#define sqz_err_no_memory    12 // ENOMEM: Out of memory
+#define sqz_err_invalid      22 // EINVAL: Invalid argument
+#define sqz_err_range        34 // ERANGE: Result too large
+#define sqz_err_data         42 // EILSEQ: Illegal byte sequence
+#define sqz_err_unsupported  40 // ENOSYS: Functionality not supported
+#define sqz_err_no_space     55 // ENOBUFS: No buffer space available
+
+struct prob_model  { // probability model
+    uint64_t freq[256];
+    uint64_t tree[256]; // Fenwick Tree (aka BITS)
 };
 
-struct huffman {
-    struct huffman_node* node;
-    int32_t n;
-    int32_t next;  // next non-terminal nodes in the tree >= n
-    int32_t depth; // max tree depth seen
-    int32_t complete; // tree is too deep or freq too high - no more updates
-    struct { // stats:
-        size_t updates;
-        size_t swaps;
-        size_t moves;
-    } stats;
+struct range_coder {
+    uint64_t low;
+    uint64_t range;
+    uint64_t code;
+    void    (*write)(struct range_coder*, uint8_t);
+    uint8_t (*read)(struct range_coder*);
+    int32_t  error; // sticky error (e.g. errno_t from read/write)
 };
 
-struct bitstream {
-    void*    stream; // stream and (data,capacity) are exclusive
-    uint8_t* data;
-    uint64_t capacity; // data[capacity]
-    uint64_t bytes; // number of bytes written or read
-    uint64_t b64;   // bit shifting buffer
-    int32_t  bits;  // bit count inside b64
-    errno_t  error; // sticky error
-    errno_t (*write64)(struct bitstream* bs); // write 64 bits from b64
-    errno_t (*read64)(struct bitstream* bs);  // read 64 bits to b64
+struct sqz { // range coder
+    struct range_coder rc;
+    void*  that;                    // convenience for caller i/o override
+    struct prob_model  pm_size;     // size: 0..255
+    struct prob_model  pm_byte;     // single byte
+    struct prob_model  pm_dist;     // number of bytes in distance - 1: 0,1,2
+    struct prob_model  pm_dist1;    // single byte distance
+    struct prob_model  pm_dist2[2];
+    struct prob_model  pm_dist3[3];
 };
 
-struct sqz {
-    struct huffman lit; // 0..255 literal bytes; 257-285 length
-    struct huffman pos; // positions tree of 1^win_bits
-    struct huffman_node lit_nodes[512 * 2 - 1];
-    struct huffman_node pos_nodes[32 * 2 - 1];
-    struct bitstream* bs;
-    errno_t error; // sticky
-    uint8_t len_index[sqz_deflate_sym_max  + 1]; // sqz_len_base index
-    uint8_t pos_index[sqz_deflate_distance + 1]; // sqz_pos_base index
-};
+static_assert(offsetof(struct sqz, rc) == 0, "rc must be first field of sqz");
 
 #if defined(__cplusplus)
 extern "C" {
 #endif
 
-void sqz_init(struct sqz* s);
-void sqz_write_header(struct bitstream* bs, uint64_t bytes);
-void sqz_compress(struct sqz* s, struct bitstream* bs,
-                      const void* data, size_t bytes, uint16_t window);
-void sqz_read_header(struct bitstream* bs, uint64_t *bytes);
-void sqz_decompress(struct sqz* s, struct bitstream* bs,
-                        void* data, size_t bytes);
+void     sqz_init(struct sqz* s);
+void     sqz_compress(struct sqz* s, const void* data, uint64_t bytes, uint16_t window);
+uint64_t sqz_decompress(struct sqz* s, void* data, uint64_t bytes);
 
 #if defined(__cplusplus)
 } // extern "C"
