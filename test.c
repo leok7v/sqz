@@ -239,110 +239,17 @@ int main(int argc, const char* argv[]) {
 
 #endif // 0
 
+#include "rt/file.h"
+
 static uint8_t squeeze_id[8] = { 's', 'q', 'u', 'e', 'e', 'z', 'e', '4' };
 
-static void* allocate(size_t bytes) {
-    void* a = calloc(1, bytes);
-    swear(a != (void*)0);
-    if (a == (void*)0) { exit(1); }
-    return a;
-}
-
-static uint64_t checksum_init(void) {
-    return 0xCBF29CE484222325uLL; // FNV offset basis
-}
-
-static uint64_t checksum_append(uint64_t checksum, const uint8_t byte) {
-    checksum ^= byte;
-    checksum *= 0x100000001B3; // FNV prime
-    checksum ^= (checksum >> 32);
-    return (checksum << 7) | (checksum >> (64 - 7));
-}
-
-struct io { // either memory or file output:
-    uint8_t* data;
-    size_t   capacity;
-    size_t   allocated;
-    void*    file;
-    uint64_t bytes;    // number of bytes read by read_byte()
-    uint64_t written;  // number of bytes written by write_byte()
-    uint64_t checksum; // FNV hash
-};
-
-static errno_t io_init_with(struct io* io, void* data, size_t bytes) {
-    swear(bytes > 0 && data != 0);
-    memset(io, 0, sizeof(*io));
-    io->checksum = checksum_init();
-    io->data = data;
-    io->capacity = bytes;
-    return 0;
-}
-
-static errno_t io_init_alloc(struct io* io, size_t bytes) {
-    memset(io, 0, sizeof(*io));
-    io->checksum = checksum_init();
-    io->data = allocate(bytes);
-    io->capacity = bytes;
-    io->allocated = bytes;
-    return 0;
-}
-
-static errno_t io_init_file_read(struct io* io, const char* filename) {
-    memset(io, 0, sizeof(*io));
-    io->checksum = checksum_init();
-    io->file = fopen(filename, "rb");
-    return io->file != (void*)0 ? 0 : errno;
-}
-
-static errno_t io_init_file_write(struct io* io, const char* filename) {
-    memset(io, 0, sizeof(*io));
-    io->checksum = checksum_init();
-    io->file = fopen(filename, "wb");
-    return io->file != (void*)0 ? 0 : errno;
-}
-
-static errno_t io_rewind(struct io* io) {
-    errno_t r = 0;
-    if (io->file != (void*)0) {
-        r = fseek((FILE*)io->file, 0, SEEK_SET) == 0 ? 0 : errno;
-    } else if (io->data != (void*)0) {
-        io->bytes = 0;
-    } else {
-        r = sqz_err_invalid;
-    }
-    io->checksum = checksum_init();
-    return r;
-}
-
-static errno_t io_close(struct io* io) {
-    errno_t r = 0;
-    if (io->file != (void*)0) {
-        r = fclose((FILE*)io->file) == 0 ? 0 : errno;
-    } else if (io->allocated > 0) {
-        free(io->data);
-    }
-    return r;
-}
 
 static void put(struct range_coder* rc, uint8_t b) {
     struct sqz* s = (struct sqz*)rc;
     struct io* io = s->that;
     if (rc->error == 0) {
-        if (io->file != (void*)0) {
-            size_t read = fread(&b, 1, 1, (FILE*)io->file);
-            s->rc.error = read == 1 ? 0 : errno;
-        } else if (io->data != null) {
-            if (io->written < io->capacity) {
-                io->data[io->written++] = b;
-            } else {
-                rc->error = sqz_err_too_big;
-            }
-        } else {
-            rc->error = sqz_err_invalid;
-        }
-    }
-    if (s->rc.error == 0) {
-        io->checksum = checksum_append(io->checksum, b);
+        io_put(io, b);
+        rc->error = io->error;
     }
 }
 
@@ -351,23 +258,8 @@ static uint8_t get(struct range_coder* rc) {
     struct io* io = s->that;
     uint8_t b = 0;
     if (rc->error == 0) {
-        if (io->file != (void*)0) {
-            size_t written = fwrite(&b, 1, 1, (FILE*)io->file);
-            s->rc.error = written == 1 ? 0 : errno;
-        } else if (io->data != null) {
-            if (io->bytes >= io->written) {
-                rc->error = sqz_err_io;
-            } else if (io->bytes >= io->capacity) {
-                rc->error = sqz_err_range;
-            } else {
-                b = io->data[io->bytes++];
-            }
-        } else {
-            rc->error = sqz_err_invalid;
-        }
-    }
-    if (s->rc.error == 0) {
-        io->checksum = checksum_append(io->checksum, b);
+        b = io_get(io);
+        rc->error = io->error;
     }
     return b;
 }
@@ -376,29 +268,43 @@ int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
     static struct sqz squeeze = {0};
     struct sqz* s = &squeeze;
-    static uint8_t io_data[1024 * 1024];
+    static uint8_t memory[1024 * 1024];
     struct io io = { 0 };
-    io_init_with(&io, io_data, sizeof(io_data));
+    io_init(&io, memory, sizeof(memory));
     s->that = &io;
     s->rc.write = put;
     s->rc.read = get;
-    // compress:
     const char input[] = "abcd.abcd - Hello World Hello.World Hello World";
-    sqz_init(s);
-    size_t len = strlen(input);
-    sqz_compress(s, input, len, 1u << 10);
-    assert(s->rc.error == 0);
-    printf("\"%.*s\" 0x%016llX\n", (int)len, input, io.checksum);
-    uint64_t checksum = io.checksum;
-    // decompress:
-    io_rewind(&io);
-    uint8_t output[1024] = { 0 };
-    sqz_init(s);
-    uint64_t k = sqz_decompress(s, output, sizeof(output));
-    assert(k == len);
-    assert(s->rc.error == 0);
-    printf("\"%.*s\" 0x%016llX\n", (int)len, output, io.checksum);
-    assert(checksum == io.checksum);
-    bool equal = memcmp(input, output, sizeof(input)) == 0;
-    assert(equal);
+    uint64_t bytes = strlen(input);
+    uint64_t ecs = 0; // encoder checksum
+    {   // compress:
+        sqz_init(s);
+        io_write(&io, squeeze_id, sizeof(squeeze_id));
+        io_put64(&io, bytes);
+        sqz_compress(s, input, bytes, 1u << 10);
+        ecs = io.checksum;
+        io_put64(&io, io.checksum);
+        assert(s->rc.error == 0);
+        printf("\"%.*s\" 0x%016llX\n", (int)bytes, input, ecs);
+    }
+    uint64_t dcs = 0; // decoder checksum
+    {   // decompress:
+        io_rewind(&io);
+        uint8_t id[8] = {0};
+        io_read(&io, id, sizeof(id));
+        swear(memcmp(id, squeeze_id, sizeof(id)) == 0);
+        uint64_t written = io_get64(&io);
+        uint8_t output[1024] = { 0 };
+        sqz_init(s);
+        uint64_t k = sqz_decompress(s, output, sizeof(output));
+        dcs = io.checksum;
+        assert(k == bytes && written == bytes);
+        assert(s->rc.error == 0);
+        printf("\"%.*s\" 0x%016llX\n", (int)k, output, dcs);
+        dcs = io_get64(&io); // checksum
+        assert(ecs == dcs);
+        bool equal = memcmp(input, output, bytes) == 0;
+        assert(equal);
+    }
+    return 0;
 }

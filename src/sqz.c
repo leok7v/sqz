@@ -17,7 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static_assert(sizeof(int) >= 4, "32 bits minimum");
+static_assert(sizeof(int) >= 4, "32 bits minimum"); // 16 bit int unsupported
 
 #ifndef countof
 #define countof(a) (sizeof(a) / sizeof((a)[0]))
@@ -199,6 +199,7 @@ enum { sqz_max_len = 254 };
 
 void sqz_compress(struct sqz* s, const void* memory, uint64_t bytes,
                   uint16_t window) {
+    static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (bytes > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
         s->rc.error = sqz_err_too_big;
     }
