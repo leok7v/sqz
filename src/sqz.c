@@ -161,7 +161,7 @@ static uint8_t rc_err(struct range_coder* rc, int32_t e) {
 
 static uint8_t rc_decode(struct range_coder* rc, struct prob_model* pm) {
     uint64_t total = pm_total_freq(pm);
-    if (total < 1) { return rc_err(rc, sqz_err_invalid); }
+    if (total < 1) { return rc_err(rc, EINVAL); }
     if (rc->range < total) {
         rc_consume(rc);
         rc_consume(rc);
@@ -169,10 +169,10 @@ static uint8_t rc_decode(struct range_coder* rc, struct prob_model* pm) {
     }
     uint64_t sum   = (rc->code - rc->low) / (rc->range / total);
     int32_t  sym   = pm_index_of(pm, sum);
-    if (sym < 0 || pm->freq[sym] == 0) { return rc_err(rc, sqz_err_data); }
+    if (sym < 0 || pm->freq[sym] == 0) { return rc_err(rc, EILSEQ); }
     uint64_t start = pm_sum_of(pm, sym);
     uint64_t size  = pm->freq[sym];
-    if (size == 0 || rc->range < total) { return rc_err(rc, sqz_err_data); }
+    if (size == 0 || rc->range < total) { return rc_err(rc, EILSEQ); }
     rc->range /= total;
     rc->low   += start * rc->range;
     rc->range *= size;
@@ -197,14 +197,14 @@ void sqz_init(struct sqz* s) {
 enum { sqz_min_len =   3 };
 enum { sqz_max_len = 254 };
 
-void sqz_compress(struct sqz* s, const void* memory, uint64_t bytes,
+void sqz_compress(struct sqz* s, const void* memory, size_t bytes,
                   uint16_t window) {
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (bytes > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
-        s->rc.error = sqz_err_too_big;
+        s->rc.error = E2BIG;
     }
     const uint8_t* d = (const uint8_t*)memory;
-    uint64_t i = 0;
+    size_t i = 0;
     while (i < bytes && s->rc.error == 0) {
         size_t size = 0;
         size_t dist = 0;
@@ -259,7 +259,7 @@ void sqz_compress(struct sqz* s, const void* memory, uint64_t bytes,
     rc_flush(&s->rc);
 }
 
-uint64_t sqz_decompress(struct sqz* s, void* data, uint64_t bytes) {
+uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
     s->rc.code = 0;  // read first 8 bytes
     for (size_t i = 0; i < sizeof(s->rc.code); i++) {
         s->rc.code = (s->rc.code << 8) + s->rc.read(&s->rc);
@@ -275,10 +275,10 @@ uint64_t sqz_decompress(struct sqz* s, void* data, uint64_t bytes) {
             if (i < bytes) {
                 d[i++] = rc_decode(&s->rc, &s->pm_byte);
             } else {
-                s->rc.error = sqz_err_no_space;
+                s->rc.error = ENOBUFS;
             }
         } else if (size < sqz_min_len || size > sqz_max_len) {
-            s->rc.error = sqz_err_range;
+            s->rc.error = ERANGE;
         } else {
             uint8_t bc = rc_decode(&s->rc, &s->pm_dist); // byte count - 1
             if (s->rc.error != 0) { break; }
@@ -294,19 +294,19 @@ uint64_t sqz_decompress(struct sqz* s, void* data, uint64_t bytes) {
                 dist |= ((uint32_t)rc_decode(&s->rc, &s->pm_dist3[2])) << 16;
             } else {
                 assert(false);
-                s->rc.error = sqz_err_data;
+                s->rc.error = EILSEQ;
             }
             if (s->rc.error == 0) {
                 const size_t n = i + size;
                 if (i < dist) {
-                    s->rc.error = sqz_err_range;
+                    s->rc.error = ERANGE;
                 } else if (i >= dist && n < bytes) {
                     // memcpy() cannot be used on overlapped regions
                     // because it may read more than one byte at a time.
                     uint8_t* p = d - (size_t)dist;
                     while (i < n) { d[i] = p[i]; i++; }
                 } else {
-                    s->rc.error = sqz_err_no_space;
+                    s->rc.error = ENOBUFS;
                 }
             }
         }

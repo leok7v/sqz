@@ -14,14 +14,14 @@ enum {
 // of debugging (e.g. strerror()) and testing de facto
 // errno_t values are used.
 
-#define sqz_err_io            5 // EIO   : I/O error
-#define sqz_err_too_big       7 // E2BIG : Argument list too long
-#define sqz_err_no_memory    12 // ENOMEM: Out of memory
-#define sqz_err_invalid      22 // EINVAL: Invalid argument
-#define sqz_err_range        34 // ERANGE: Result too large
-#define sqz_err_data         42 // EILSEQ: Illegal byte sequence
-#define sqz_err_unsupported  40 // ENOSYS: Functionality not supported
-#define sqz_err_no_space     55 // ENOBUFS: No buffer space available
+// #define sqz_err_io            5 // EIO   : I/O error
+// #define sqz_err_too_big       7 // E2BIG : Argument list too long
+// #define sqz_err_no_memory    12 // ENOMEM: Out of memory
+// #define sqz_err_invalid      22 // EINVAL: Invalid argument
+// #define sqz_err_range        34 // ERANGE: Result too large
+// #define sqz_err_data         42 // EILSEQ: Illegal byte sequence
+// #define sqz_err_unsupported  40 // ENOSYS: Functionality not supported
+// #define sqz_err_no_space     55 // ENOBUFS: No buffer space available
 
 struct prob_model  { // probability model
     uint64_t freq[256];
@@ -55,8 +55,15 @@ extern "C" {
 #endif
 
 void     sqz_init(struct sqz* s);
-void     sqz_compress(struct sqz* s, const void* data, uint64_t bytes, uint16_t window);
-uint64_t sqz_decompress(struct sqz* s, void* data, uint64_t bytes);
+void     sqz_compress(struct sqz* s, const void* d, size_t b, uint16_t window);
+uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes);
+
+// Because in C arrays are indexed by both positive and negative index values
+// for the simplicity of memory handling the compress/decompress is limited
+// to less than 2 ^ (sizeof(size_t) * 8 - 1) bytes.
+// It is possible to compress/decompress to be able to handle 2^32 - 1 on
+// 32-bit platform but probably does not worth the battle.
+// Larger files on 32 bit architectures can be handled in chunks.
 
 #if defined(__cplusplus)
 } // extern "C"

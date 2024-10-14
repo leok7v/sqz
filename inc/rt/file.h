@@ -15,10 +15,44 @@
 #include <unistd.h> // chdir
 #endif
 
+// input/output to file or memory:
+
+struct io { // either memory or file i/o:
+    uint8_t* data;
+    size_t   capacity;
+    size_t   allocated;
+    FILE*    file;
+    uint64_t bytes;    // number of bytes read by read_byte()
+    uint64_t written;  // number of bytes written by write_byte()
+    uint64_t checksum; // FNV hash of put()/get() single byte io
+    int32_t  error;    // sticky
+    bool     fail_fast;
+};
+
 static errno_t file_chdir(const char* name);
 static bool    file_exist(const char* filename);
 static errno_t file_size(FILE* f, size_t* size);
-static errno_t file_read_fully(const char* fn, const uint8_t* *data, size_t *bytes);
+static errno_t file_read_fully(const char* fn, const uint8_t* *data,
+                               size_t *bytes);
+
+static uint64_t checksum_init(void); // FNV-1a offset basis
+static uint64_t checksum_append(uint64_t checksum, const uint8_t byte);
+
+static void     io_init(struct io* io);
+static void     io_init_with(struct io* io, void* data, size_t bytes);
+static void     io_alloc(struct io* io, size_t bytes);
+static void     io_open(struct io* io, const char* filename);
+static void     io_create(struct io* io, const char* filename);
+static void     io_rewind(struct io* io);
+static void     io_write(struct io* io, void* data, size_t bytes);
+static void     io_read(struct io* io, void* data, size_t bytes);
+static void     io_put(struct io* io, uint8_t b); // accumulates checksum
+static uint8_t  io_get(struct io* io);            // accumulates checksum
+static uint64_t io_get64(struct io* io);
+static void     io_put64(struct io* io, uint64_t v);
+static void     io_read_fully(struct io* io, const char* fn);
+static void     io_write_fully(struct io* io, const char* fn);
+static void     io_close(struct io* io);
 
 static bool file_exist(const char* filename) {
     struct stat st = {0};
@@ -74,62 +108,62 @@ static errno_t file_chdir(const char* name) {
     return 0;
 }
 
-// input/ooutput to file or memory:
-
-struct io { // either memory or file i/o:
-    uint8_t* data;
-    size_t   capacity;
-    size_t   allocated;
-    FILE*    file;
-    uint64_t bytes;    // number of bytes read by read_byte()
-    uint64_t written;  // number of bytes written by write_byte()
-    uint64_t checksum; // FNV hash of put()/get() single byte io
-    int32_t  error;    // sticky
-};
+#define io_fail_fast(io) do {       \
+    if (io->fail_fast) {            \
+        swear(io->error == 0);      \
+        exit(io->error);            \
+    }                               \
+} while (0)
 
 // https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
 
-static uint64_t io_checksum_init(void) {
+static uint64_t checksum_init(void) {
     return 0xCBF29CE484222325uLL; // FNV offset basis
 }
 
-static uint64_t io_checksum_append(uint64_t checksum, const uint8_t byte) {
+static uint64_t checksum_append(uint64_t checksum, const uint8_t byte) {
     checksum ^= byte;
     checksum *= 0x100000001B3; // FNV prime
     checksum ^= (checksum >> 32);
     return (checksum << 7) | (checksum >> (64 - 7));
 }
 
-static void io_init(struct io* io, void* data, size_t bytes) {
-    swear(bytes > 0 && data != 0);
+static void io_init(struct io* io) {
     memset(io, 0, sizeof(*io));
-    io->checksum = io_checksum_init();
+    io->checksum = checksum_init();
+}
+
+static void io_init_with(struct io* io, void* data, size_t bytes) {
+    // caller responsible for [data:bytes] lifetime
+    swear(bytes > 0 && data != 0);
+    io_init(io);
     io->data = data;
     io->capacity = bytes;
 }
 
 static void io_alloc(struct io* io, size_t bytes) {
-    memset(io, 0, sizeof(*io));
-    io->checksum = io_checksum_init();
+    io_init(io);
     io->data = calloc(1, bytes);
-    swear(io->data != NULL);
-    if (io->data == NULL) { exit(1); }
-    io->capacity = bytes;
-    io->allocated = bytes;
+    io->error = io->data != NULL ? 0 : errno;
+    io_fail_fast(io);
+    if (io->data != NULL) {
+        io->capacity = bytes;
+        io->allocated = bytes;
+    }
 }
 
 static void io_open(struct io* io, const char* filename) {
-    memset(io, 0, sizeof(*io));
-    io->checksum = io_checksum_init();
+    io_init(io);
     io->file = fopen(filename, "rb");
     io->error = io->file != NULL ? 0 : errno;
+    io_fail_fast(io);
 }
 
 static void io_create(struct io* io, const char* filename) {
-    memset(io, 0, sizeof(*io));
-    io->checksum = io_checksum_init();
+    io_init(io);
     io->file = fopen(filename, "wb");
     io->error = io->file != NULL ? 0 : errno;
+    io_fail_fast(io);
 }
 
 static void io_rewind(struct io* io) {
@@ -140,59 +174,7 @@ static void io_rewind(struct io* io) {
     } else {
         io->error = EINVAL;
     }
-    io->checksum = io_checksum_init();
-}
-
-static void io_close(struct io* io) {
-    if (io->file != NULL) {
-        io->error = fclose(io->file) == 0 ? 0 : errno;
-    } else if (io->allocated > 0) {
-        free(io->data);
-    }
-}
-
-static void io_put(struct io* io, uint8_t b) {
-    if (io->error == 0) {
-        if (io->file != NULL) {
-            size_t written = fwrite(&b, 1, 1, io->file);
-            io->error = written == 1 ? 0 : errno;
-        } else if (io->data != null) {
-            if (io->written < io->capacity) {
-                io->data[io->written++] = b;
-            } else {
-                io->error = E2BIG;
-            }
-        } else {
-            io->error = EINVAL;
-        }
-    }
-    if (io->error == 0) {
-        io->checksum = io_checksum_append(io->checksum, b);
-    }
-}
-
-static uint8_t io_get(struct io* io) {
-    uint8_t b = 0;
-    if (io->error == 0) {
-        if (io->file != NULL) {
-            size_t read = fread(&b, 1, 1, io->file);
-            io->error = read == 1 ? 0 : errno;
-        } else if (io->data != null) {
-            if (io->bytes >= io->written) {
-                io->error = EIO;
-            } else if (io->bytes >= io->capacity) {
-                io->error = ERANGE;
-            } else {
-                b = io->data[io->bytes++];
-            }
-        } else {
-            io->error = EINVAL;
-        }
-    }
-    if (io->error == 0) {
-        io->checksum = io_checksum_append(io->checksum, b);
-    }
-    return b;
+    io_fail_fast(io);
 }
 
 static void io_write(struct io* io, void* data, size_t bytes) {
@@ -208,6 +190,7 @@ static void io_write(struct io* io, void* data, size_t bytes) {
     } else {
         io->error = EINVAL;
     }
+    io_fail_fast(io);
 }
 
 static void io_read(struct io* io, void* data, size_t bytes) {
@@ -223,6 +206,27 @@ static void io_read(struct io* io, void* data, size_t bytes) {
     } else {
         io->error = EINVAL;
     }
+    io_fail_fast(io);
+}
+
+static void io_put(struct io* io, uint8_t b) {
+    if (io->error == 0) {
+        io_write(io, &b, sizeof(b));
+    }
+    if (io->error == 0) {
+        io->checksum = checksum_append(io->checksum, b);
+    }
+}
+
+static uint8_t io_get(struct io* io) {
+    uint8_t b = 0;
+    if (io->error == 0) {
+        io_read(io, &b, sizeof(b));
+    }
+    if (io->error == 0) {
+        io->checksum = checksum_append(io->checksum, b);
+    }
+    return b;
 }
 
 static uint64_t io_get64(struct io* io) {
@@ -236,25 +240,38 @@ static void io_put64(struct io* io, uint64_t v) {
 }
 
 static void io_read_fully(struct io* io, const char* fn) {
-    memset(io, 0, sizeof(*io));
-    io->checksum = io_checksum_init();
+    io_init(io);
     io->error = file_read_fully(fn, &io->data, &io->capacity);
     if (io->data != NULL) {
         io->allocated = io->capacity;
     }
+    io_fail_fast(io);
 }
 
 static void io_write_fully(struct io* io, const char* fn) {
     swear(io->file == NULL && io->data != NULL);
     FILE* f = fopen(fn, "wb");
-    if (f == NULL) {
-        io->error = errno;
-    } else {
-        size_t written = fwrite(&io->data, io->written, 1, io->file);
+    if (f != NULL) {
+        size_t written = fwrite(&io->data, (size_t)io->written, 1, io->file);
         io->error = written == 1 ? 0 : errno;
         errno_t r = fclose(f) == 0 ? 0 : errno;
         if (io->error == 0) { io->error = r; }
+    } else {
+        io->error = errno;
     }
+    io_fail_fast(io);
+}
+
+static void io_close(struct io* io) {
+    if (io->file != NULL) {
+        io->error = fclose(io->file) == 0 ? 0 : errno;
+        io_fail_fast(io);
+    } else if (io->allocated > 0) {
+        free(io->data);
+    } else if (io->data == NULL) {
+        io->error = EINVAL;
+    }
+    io_fail_fast(io);
 }
 
 #endif // file_header_included

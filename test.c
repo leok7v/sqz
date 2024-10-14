@@ -270,12 +270,13 @@ int main(int argc, const char* argv[]) {
     struct sqz* s = &squeeze;
     static uint8_t memory[1024 * 1024];
     struct io io = { 0 };
-    io_init(&io, memory, sizeof(memory));
+    io_init_with(&io, memory, sizeof(memory));
+    io.fail_fast = true;
     s->that = &io;
     s->rc.write = put;
     s->rc.read = get;
     const char input[] = "abcd.abcd - Hello World Hello.World Hello World";
-    uint64_t bytes = strlen(input);
+    size_t bytes = strlen(input);
     uint64_t ecs = 0; // encoder checksum
     {   // compress:
         sqz_init(s);
@@ -284,7 +285,7 @@ int main(int argc, const char* argv[]) {
         sqz_compress(s, input, bytes, 1u << 10);
         ecs = io.checksum;
         io_put64(&io, io.checksum);
-        assert(s->rc.error == 0);
+        swear(s->rc.error == 0);
         printf("\"%.*s\" 0x%016llX\n", (int)bytes, input, ecs);
     }
     uint64_t dcs = 0; // decoder checksum
@@ -298,13 +299,13 @@ int main(int argc, const char* argv[]) {
         sqz_init(s);
         uint64_t k = sqz_decompress(s, output, sizeof(output));
         dcs = io.checksum;
-        assert(k == bytes && written == bytes);
-        assert(s->rc.error == 0);
+        swear(k == bytes && written == bytes);
+        swear(s->rc.error == 0);
         printf("\"%.*s\" 0x%016llX\n", (int)k, output, dcs);
         dcs = io_get64(&io); // checksum
-        assert(ecs == dcs);
-        bool equal = memcmp(input, output, bytes) == 0;
-        assert(equal);
+        swear(ecs == dcs);
+        bool equal = memcmp(input, output, (size_t)bytes) == 0;
+        swear(equal);
     }
     return 0;
 }
