@@ -35,6 +35,7 @@ struct range_coder {
     void    (*write)(struct range_coder*, uint8_t);
     uint8_t (*read)(struct range_coder*);
     int32_t  error; // sticky error (e.g. errno_t from read/write)
+    int32_t  padding;
 };
 
 struct sqz { // range coder

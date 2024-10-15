@@ -300,7 +300,7 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
                 const size_t n = i + size;
                 if (i < dist) {
                     s->rc.error = ERANGE;
-                } else if (i >= dist && n < bytes) {
+                } else if (i >= dist && n <= bytes) {
                     // memcpy() cannot be used on overlapped regions
                     // because it may read more than one byte at a time.
                     uint8_t* p = d - (size_t)dist;

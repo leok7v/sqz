@@ -38,7 +38,6 @@ static double entropy(uint64_t* freq, size_t n) { // Shannon entropy
 
 static uint8_t squeeze_id[8] = { 's', 'q', 'u', 'e', 'e', 'z', 'e', '4' };
 
-
 static void write_header(struct io* io, uint64_t bytes) {
     io_write(io, squeeze_id, sizeof(squeeze_id));
     io_put64(io, bytes);
