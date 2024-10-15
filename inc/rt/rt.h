@@ -23,6 +23,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#if __has_include(<threads.h>) // C11 `optional` threads
+#include <threads.h>
+#endif
 
 #ifdef _WIN32
 #define STRICT

@@ -1,9 +1,9 @@
 #ifndef rt_generics_header_included
 #define rt_generics_header_included
 
-#if __has_include("alloca.h") // alloca()
+#if __has_include(<alloca.h>) // alloca()
 #include <alloca.h>
-#elif __has_include("malloc.h")
+#elif __has_include(<malloc.h>)
 #include <malloc.h>
 #endif
 
