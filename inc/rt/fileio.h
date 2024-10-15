@@ -183,7 +183,6 @@ static void io_write(struct io* io, void* data, size_t bytes) {
     } else if (io->data != NULL) {
         if (io->written + bytes <= io->capacity) {
             memcpy(io->data + io->written, data, bytes);
-            io->written += bytes;
         } else {
             io->error = E2BIG;
         }
@@ -191,6 +190,7 @@ static void io_write(struct io* io, void* data, size_t bytes) {
         io->error = EINVAL;
     }
     io_fail_fast(io);
+    if (io->error == 0) { io->written += bytes; }
 }
 
 static void io_read(struct io* io, void* data, size_t bytes) {
@@ -199,7 +199,6 @@ static void io_read(struct io* io, void* data, size_t bytes) {
     } else if (io->data != NULL) {
         if (io->bytes + bytes <= io->written) {
             memcpy(data, io->data + io->bytes, bytes);
-            io->bytes += bytes;
         } else {
             io->error = EIO;
         }
@@ -207,6 +206,7 @@ static void io_read(struct io* io, void* data, size_t bytes) {
         io->error = EINVAL;
     }
     io_fail_fast(io);
+    if (io->error == 0) { io->bytes += bytes; }
 }
 
 static void io_put(struct io* io, uint8_t b) {

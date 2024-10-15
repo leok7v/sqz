@@ -13,7 +13,7 @@
     <ClInclude Include="..\inc\sqz\sqz.h">
       <Filter>inc\sqz</Filter>
     </ClInclude>
-    <ClInclude Include="..\inc\rt\file.h">
+    <ClInclude Include="..\inc\rt\fileio.h">
       <Filter>inc\rt</Filter>
     </ClInclude>
     <ClInclude Include="..\inc\rt\rt.h">
@@ -22,7 +22,7 @@
     <ClInclude Include="..\inc\rt\rt_generics.h">
       <Filter>inc\rt</Filter>
     </ClInclude>
-    <ClInclude Include="..\inc\rt\unstd.h">
+    <ClInclude Include="..\inc\rt\ustd.h">
       <Filter>inc\rt</Filter>
     </ClInclude>
   </ItemGroup>

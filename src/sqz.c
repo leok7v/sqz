@@ -228,9 +228,9 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes,
             }
         }
         if (size >= sqz_min_len) {
-            printf("[%d,%d]", (int)size, (int)dist);
+//          printf("[%d,%d]", (int)size, (int)dist);
             rc_encode(&s->rc, &s->pm_size, (uint8_t)size);
-            assert(sqz_min_len <= dist && dist < (1u << 24));
+            assert(1 <= dist && dist < (1u << 24));
             int bc = sqz_bytes_of((uint32_t)dist); // byte count
             rc_encode(&s->rc, &s->pm_dist, (uint8_t)(bc - 1));
             if (bc == 1) {
@@ -249,11 +249,11 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes,
         } else {
             rc_encode(&s->rc, &s->pm_size, 0);
             rc_encode(&s->rc, &s->pm_byte, d[i]);
-            printf("%c", d[i]);
+//          printf("%c", d[i]);
             i++;
         }
     }
-    printf("\n");
+//  printf("\n");
     static_assert(sqz_min_len < 0xFF);
     rc_encode(&s->rc, &s->pm_size, 0xFF);
     rc_flush(&s->rc);

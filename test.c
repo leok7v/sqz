@@ -1,8 +1,8 @@
-#include "rt/unstd.h"
-#include "rt/file.h"
+#include "rt/ustd.h"
+#include "rt/fileio.h"
 #include "sqz/sqz.h"
 
-#if 0
+#undef SQUEEZE_MAX_WINDOW
 
 #ifdef SQUEEZE_MAX_WINDOW // maximum window
 enum { window_bits = 15 }; // 32KB
@@ -19,142 +19,161 @@ enum { window_bits = 11 }; // 2KB
 
 // Test is limited to "size_t" and "int" precision
 
-static double entropy(const struct sqz* s) { // Shannon entropy
-    const int32_t n = (int32_t)(sizeof(s->freq) / sizeof(s->freq[0]));
+static double entropy(uint64_t* freq, size_t n) { // Shannon entropy
     double total = 0;
-    for (int32_t i = 0; i < n; i++) {
-        if (s->freq[i] > 1) {
-            total += (double)s->freq[i];
+    for (size_t i = 0; i < n; i++) {
+        if (freq[i] > 1) {
+            total += (double)freq[i];
         }
     }
     double e = 0.0;
-    for (int32_t i = 0; i < n; i++) {
-        if (s->freq[i] > 1) {
-            double p_i = (double)s->freq[i] / total;
+    for (size_t i = 0; i < n; i++) {
+        if (freq[i] > 1) {
+            double p_i = (double)freq[i] / total;
             e -= p_i * log2(p_i);
         }
     }
     return e;
 }
 
-static inline void write_byte(struct sqz* s, uint8_t b) {
-    if (s->error == 0) {
-        size_t written = fwrite(&b, 1, 1, (FILE*)s->stream);
-        s->error = written == 1 ? 0 : errno;
-//      printf("0x%02X\n", b);
+static uint8_t squeeze_id[8] = { 's', 'q', 'u', 'e', 'e', 'z', 'e', '4' };
+
+
+static void write_header(struct io* io, uint64_t bytes) {
+    io_write(io, squeeze_id, sizeof(squeeze_id));
+    io_put64(io, bytes);
+}
+
+static void put(struct range_coder* rc, uint8_t b) {
+    struct sqz* s = (struct sqz*)rc;
+    struct io* io = s->that;
+    if (rc->error == 0) {
+        io_put(io, b);
+        rc->error = io->error;
     }
 }
 
 static errno_t compress(const char* from, const char* to,
                         const uint8_t* data, size_t bytes) {
-    FILE* io = null; // compressed file
-    errno_t r = fopen_s(&io, to, "wb") != 0;
-    if (r != 0 || io == null) {
-        printf("Failed to create \"%s\": %s\n", to, strerror(r));
-        return r;
+    struct io out = {0}; // compressed file
+    io_create(&out, to);
+    if (out.error != 0) {
+        printf("Failed to create \"%s\": %s\n", to, strerror(out.error));
+        return out.error;
     }
     static struct sqz encoder; // static to avoid >64KB stack warning
-    encoder.stream = io;
-    encoder.write = write_byte;
-    sqz_init_encoder(&encoder);
-    sqz_write_header(&encoder, bytes);
-    if (encoder.error != 0) {
-        r = encoder.error;
-        printf("Failed to create \"%s\": %s\n", to, strerror(r));
+    encoder.that = &out;
+    encoder.rc.write = put;
+    sqz_init(&encoder);
+    write_header(&out, bytes);
+    if (encoder.rc.error != 0) {
+        printf("io_create(\"%s\") failed: %s\n", to, strerror(encoder.rc.error));
     } else {
         sqz_compress(&encoder, data, bytes, 1u << window_bits);
-        assert(encoder.error == 0);
+        if (encoder.rc.error != 0) {
+            printf("Failed to compress: %s\n", strerror(encoder.rc.error));
+        }
+        swear(encoder.rc.error == 0);
     }
-    errno_t rc = fclose(io) == 0 ? 0 : errno; // error writing buffered output
-    if (rc != 0) {
-        printf("Failed to flush on file close: %s\n", strerror(rc));
-        if (r == 0) { r = rc; }
+    io_close(&out); // error flushing buffered output
+    if (encoder.rc.error == 0 && out.error != 0) {
+        printf("io_close(\"%s\") failed: %s\n", to, strerror(out.error));
+        encoder.rc.error = out.error;
     }
-    if (r == 0) { r = encoder.error; }
-    if (r != 0) {
-        printf("Failed to compress: %s\n", strerror(r));
-    } else {
+    if (encoder.rc.error == 0) {
         char* fn = from == null ? null : strrchr(from, '\\'); // basename
         if (fn == null) { fn = from == null ? null : strrchr(from, '/'); }
         if (fn != null) { fn++; } else { fn = (char*)from; }
-        const uint64_t written = encoder.bytes;
-        double pc = written * 100.0 / bytes; // percent
-        double bps = written * 8.0 / bytes;  // bits per symbol
-        printf("bps: %.1f ", bps);
-        printf("H: %.1f ", entropy(&encoder));
+        double pc  = out.written * 100.0 / bytes; // percent
+        double bps = out.written * 8.0   / bytes; // bits per symbol
+        printf("bps: %4.1f ", bps);
         if (from != null) {
             printf("%7lld -> %7lld %5.1f%% of \"%s\"\n",
-                  (uint64_t)bytes, written, pc, fn);
+                  (uint64_t)bytes, out.written, pc, fn);
         } else {
-            printf("%7lld -> %7lld %5.1f%%\n", (uint64_t)bytes, written, pc);
+            printf("%7lld -> %7lld %5.1f%%\n",
+                  (uint64_t)bytes, out.written, pc);
         }
     }
-    return r;
+    return encoder.rc.error;
 }
 
-static inline void read_byte(struct sqz* s, uint8_t* b) {
-    if (s->error == 0) {
-        size_t read = fread(b, 1, 1, (FILE*)s->stream);
-        s->error = read == 1 ? 0 : errno;
-//      printf("0x%02X\n", *b);
+static void read_header(struct io* io, uint64_t *bytes) {
+    uint8_t id[8] = {0};
+    io_read(io, id, sizeof(id));
+    *bytes = io_get64(io);
+    if (io->error == 0 && memcmp(id, squeeze_id, sizeof(id)) != 0) {
+        io->error = EILSEQ;
     }
 }
 
+static uint8_t get(struct range_coder* rc) {
+    struct sqz* s = (struct sqz*)rc;
+    struct io* io = s->that;
+    uint8_t b = 0;
+    if (rc->error == 0) {
+        b = io_get(io);
+        rc->error = io->error;
+    }
+    return b;
+}
 
 static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
     // decompress and compare
-    FILE* in = null; // compressed file
-    errno_t r = fopen_s(&in, fn, "rb");
-    if (r != 0 || in == null) {
+    struct io in = {0}; // compressed file
+    io_open(&in, fn);
+    if (in.error != 0) {
         printf("Failed to open \"%s\"\n", fn);
+        return in.error;
     }
     uint64_t bytes = 0;
     static struct sqz decoder; // static to avoid >64KB stack warning
-    decoder.stream = in;
-    decoder.read = read_byte;
-    if (decoder.error != 0) {
+    sqz_init(&decoder);
+    decoder.that = &in;
+    decoder.rc.read = get;
+    read_header(&in, &bytes);
+    if (in.error != 0) {
         printf("Failed to read header from \"%s\"\n", fn);
-        r = decoder.error;
-    }
-    sqz_read_header(&decoder, &bytes);
-    if (r == 0 && bytes > SIZE_MAX) {
+        io_close(&in); // was opened for reading, close will not fail
+        decoder.rc.error = in.error;
+    } else if (bytes > SIZE_MAX) {
         printf("File too large to decompress\n");
-        r = EFBIG;
+        decoder.rc.error = EFBIG;
     }
-    if (r == 0) {
-        sqz_init_decoder(&decoder);
-        assert(bytes == size);
-        uint8_t* data = (uint8_t*)calloc(1, (size_t)bytes);
-        if (data == null) {
-            printf("Failed to allocate memory for decompressed data\n");
-            fclose(in);
-            return ENOMEM;
+    struct io out = {0}; // decompressed file
+    if (decoder.rc.error == 0) {
+        io_alloc(&out, (size_t)bytes);
+        if (out.error != 0) {
+            printf("Failed to allocate memory of %lld bytes"
+                   " for decompressed data\n", bytes);
+            decoder.rc.error = out.error;
         }
-        sqz_decompress(&decoder, data, (size_t)bytes);
-        fclose(in);
-        assert(decoder.error == 0);
-        if (decoder.error == 0) {
+        if (out.error == 0 && bytes > size) { out.error = E2BIG; }
+        if (out.error != 0) {
+            decoder.rc.error = out.error;
+        }
+    }
+    if (decoder.rc.error == 0) {
+        swear(bytes == size);
+        sqz_decompress(&decoder, out.data, (size_t)bytes);
+        if (decoder.rc.error == 0) {
             const bool same = size == bytes &&
-                       memcmp(input, data, (size_t)bytes) == 0;
+                       memcmp(input, out.data, (size_t)bytes) == 0;
             if (!same) {
                 int64_t k = -1;
                 for (size_t i = 0; i < rt_min(bytes, size) && k < 0; i++) {
-                    if (input[i] != data[i]) { k = (int64_t)i; }
+                    if (input[i] != out.data[i]) { k = (int64_t)i; }
                 }
                 printf("compress() and decompress() differ @%d\n", (int)k);
-                // ENODATA is not original posix error but is OpenGroup error
-                r = ENODATA; // or EIO
+                // ENODATA is not original posix error; it is OpenGroup error
+                decoder.rc.error = ENODATA; // or EIO
             }
             assert(same); // to trigger breakpoint while debugging
-        } else {
-            r = decoder.error;
-        }
-        free(data);
-        if (r != 0) {
-            printf("Failed to decompress\n");
         }
     }
-    return r;
+    io_close(&out);
+    io_close(&in);
+    return out.error;
 }
 
 const char* compressed = "~compressed~.bin";
@@ -193,7 +212,6 @@ int main(int argc, const char* argv[]) {
     printf("Compression Window: 2^%d %d bytes size_t: %d int: %d\n",
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int));
     errno_t r = locate_test_folder();
-#if 0
     if (r == 0) {
         uint8_t data[4 * 1024] = {0};
         r = test(null, data, sizeof(data));
@@ -203,13 +221,11 @@ int main(int argc, const char* argv[]) {
         }
         r = test(null, data, sizeof(data));
     }
-#endif
     if (r == 0) {
         const char* data = "Hello World Hello.World Hello World";
         size_t bytes = strlen((const char*)data);
         r = test(null, (const uint8_t*)data, bytes);
     }
-#if 0
     if (r == 0 && file_exist(__FILE__)) { // test.c source code:
         r = test_compression(__FILE__);
     }
@@ -233,79 +249,5 @@ int main(int argc, const char* argv[]) {
             r = test_compression(files[i]);
         }
     }
-#endif
     return r;
-}
-
-#endif // 0
-
-#include "rt/file.h"
-
-static uint8_t squeeze_id[8] = { 's', 'q', 'u', 'e', 'e', 'z', 'e', '4' };
-
-
-static void put(struct range_coder* rc, uint8_t b) {
-    struct sqz* s = (struct sqz*)rc;
-    struct io* io = s->that;
-    if (rc->error == 0) {
-        io_put(io, b);
-        rc->error = io->error;
-    }
-}
-
-static uint8_t get(struct range_coder* rc) {
-    struct sqz* s = (struct sqz*)rc;
-    struct io* io = s->that;
-    uint8_t b = 0;
-    if (rc->error == 0) {
-        b = io_get(io);
-        rc->error = io->error;
-    }
-    return b;
-}
-
-int main(int argc, const char* argv[]) {
-    (void)argc; (void)argv; // unused
-    static struct sqz squeeze = {0};
-    struct sqz* s = &squeeze;
-    static uint8_t memory[1024 * 1024];
-    struct io io = { 0 };
-    io_init_with(&io, memory, sizeof(memory));
-    io.fail_fast = true;
-    s->that = &io;
-    s->rc.write = put;
-    s->rc.read = get;
-    const char input[] = "abcd.abcd - Hello World Hello.World Hello World";
-    size_t bytes = strlen(input);
-    uint64_t ecs = 0; // encoder checksum
-    {   // compress:
-        sqz_init(s);
-        io_write(&io, squeeze_id, sizeof(squeeze_id));
-        io_put64(&io, bytes);
-        sqz_compress(s, input, bytes, 1u << 10);
-        ecs = io.checksum;
-        io_put64(&io, io.checksum);
-        swear(s->rc.error == 0);
-        printf("\"%.*s\" 0x%016llX\n", (int)bytes, input, ecs);
-    }
-    uint64_t dcs = 0; // decoder checksum
-    {   // decompress:
-        io_rewind(&io);
-        uint8_t id[8] = {0};
-        io_read(&io, id, sizeof(id));
-        swear(memcmp(id, squeeze_id, sizeof(id)) == 0);
-        uint64_t written = io_get64(&io);
-        uint8_t output[1024] = { 0 };
-        sqz_init(s);
-        uint64_t k = sqz_decompress(s, output, sizeof(output));
-        dcs = io.checksum;
-        swear(k == bytes && written == bytes);
-        swear(s->rc.error == 0);
-        printf("\"%.*s\" 0x%016llX\n", (int)k, output, dcs);
-        dcs = io_get64(&io); // checksum
-        swear(ecs == dcs);
-        bool equal = memcmp(input, output, (size_t)bytes) == 0;
-        swear(equal);
-    }
-    return 0;
 }
