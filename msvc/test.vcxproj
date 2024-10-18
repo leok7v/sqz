@@ -46,6 +46,7 @@
     <ClInclude Include="..\inc\rt\fileio.h" />
     <ClInclude Include="..\inc\rt\rt.h" />
     <ClInclude Include="..\inc\rt\rt_generics.h" />
+    <ClInclude Include="..\inc\rt\rt_generics_test.h" />
     <ClInclude Include="..\inc\rt\ustd.h" />
     <ClInclude Include="..\inc\sqz\sqz.h" />
   </ItemGroup>

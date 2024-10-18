@@ -1,6 +1,7 @@
 #include "rt/ustd.h"
 #include "rt/fileio.h"
 #include "sqz/sqz.h"
+#include "rt/rt_generics_test.h"
 
 #undef SQUEEZE_MAX_WINDOW
 
@@ -208,6 +209,7 @@ static errno_t locate_test_folder(void) {
 
 int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
+    rt_test_generics();
     printf("Compression Window: 2^%d %d bytes size_t: %d int: %d\n",
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int));
     errno_t r = locate_test_folder();

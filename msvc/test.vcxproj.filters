@@ -25,6 +25,9 @@
     <ClInclude Include="..\inc\rt\ustd.h">
       <Filter>inc\rt</Filter>
     </ClInclude>
+    <ClInclude Include="..\inc\rt\rt_generics_test.h">
+      <Filter>inc\rt</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\test\x64.elf">
