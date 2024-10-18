@@ -38,6 +38,20 @@ struct range_coder {
     int32_t  padding;
 };
 
+struct map_entry {
+    const uint8_t* data;
+    uint64_t hash;
+    uint32_t bytes;
+};
+
+struct map {
+    struct map_entry* entry;
+    uint32_t n;
+    uint32_t entries;
+    uint32_t max_chain;
+    uint32_t max_bytes;
+};
+
 struct sqz { // range coder
     struct range_coder rc;
     void*  that;                    // convenience for caller i/o override
@@ -47,6 +61,7 @@ struct sqz { // range coder
     struct prob_model  pm_dist1;    // single byte distance
     struct prob_model  pm_dist2[2];
     struct prob_model  pm_dist3[3];
+    struct map         map;         // caller supplied memory for map
 };
 
 static_assert(offsetof(struct sqz, rc) == 0, "rc must be first field of sqz");

@@ -3,7 +3,8 @@
 #include "sqz/sqz.h"
 #include "rt/rt_generics_test.h"
 
-#undef SQUEEZE_MAX_WINDOW
+#undef  SQUEEZE_MAX_WINDOW
+#define SQUEEZE_MAX_WINDOW
 
 #ifdef SQUEEZE_MAX_WINDOW // maximum window
 enum { window_bits = 15 }; // 32KB
@@ -62,9 +63,15 @@ static errno_t compress(const char* from, const char* to,
         return out.error;
     }
     static struct sqz encoder; // static to avoid >64KB stack warning
+
     encoder.that = &out;
     encoder.rc.write = put;
     sqz_init(&encoder);
+    static struct map_entry map[1024 * 1024];
+    encoder.map.n = sizeof(map) / sizeof(map[0]);
+    encoder.map.entry = map;
+//encoder.map.n = 0;
+    memset(map, 0, sizeof(map));
     write_header(&out, bytes);
     if (encoder.rc.error != 0) {
         printf("io_create(\"%s\") failed: %s\n", to, strerror(encoder.rc.error));
