@@ -52,6 +52,13 @@ struct map {
     uint32_t max_bytes;
 };
 
+struct eviction_queue {
+    int32_t positions[1u < sqz_max_win_bits]; // circular buffer of entry positions
+    int32_t start;                            // index oldest entry
+    int32_t end;                              // index to the next free slot
+    int32_t count;                            // number of valid entries
+};
+
 struct sqz { // range coder
     struct range_coder rc;
     void*  that;                    // convenience for caller i/o override
@@ -62,6 +69,7 @@ struct sqz { // range coder
     struct prob_model  pm_dist2[2];
     struct prob_model  pm_dist3[3];
     struct map         map;         // caller supplied memory for map
+    struct eviction_queue eq;       // eviction queue
 };
 
 static_assert(offsetof(struct sqz, rc) == 0, "rc must be first field of sqz");
@@ -70,7 +78,7 @@ static_assert(offsetof(struct sqz, rc) == 0, "rc must be first field of sqz");
 extern "C" {
 #endif
 
-void     sqz_init(struct sqz* s);
+void     sqz_init(struct sqz* s, struct map_entry entry[], size_t n);
 void     sqz_compress(struct sqz* s, const void* d, size_t b, uint16_t window);
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes);
 

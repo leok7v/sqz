@@ -62,16 +62,12 @@ static errno_t compress(const char* from, const char* to,
         printf("Failed to create \"%s\": %s\n", to, strerror(out.error));
         return out.error;
     }
-    static struct sqz encoder; // static to avoid >64KB stack warning
-
+    static struct sqz encoder; // static for testing, can be heap malloc()-ed
+    static struct map_entry me[1024 * 1024];
     encoder.that = &out;
     encoder.rc.write = put;
-    sqz_init(&encoder);
-    static struct map_entry map[1024 * 1024];
-    encoder.map.n = sizeof(map) / sizeof(map[0]);
-    encoder.map.entry = map;
-//encoder.map.n = 0;
-    memset(map, 0, sizeof(map));
+    sqz_init(&encoder, me, sizeof(me) / sizeof(me[0]));
+//  encoder.map.n = 0;
     write_header(&out, bytes);
     if (encoder.rc.error != 0) {
         printf("io_create(\"%s\") failed: %s\n", to, strerror(encoder.rc.error));
@@ -95,10 +91,10 @@ static errno_t compress(const char* from, const char* to,
         double bps = out.written * 8.0   / bytes; // bits per symbol
         printf("bps: %4.1f ", bps);
         if (from != null) {
-            printf("%7lld -> %7lld %5.1f%% of \"%s\"\n",
+            printf("%7lld -> %7lld %5.1f%% of \"%s\"\n\n",
                   (uint64_t)bytes, out.written, pc, fn);
         } else {
-            printf("%7lld -> %7lld %5.1f%%\n",
+            printf("%7lld -> %7lld %5.1f%%\n\n",
                   (uint64_t)bytes, out.written, pc);
         }
     }
@@ -135,7 +131,7 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
     }
     uint64_t bytes = 0;
     static struct sqz decoder; // static to avoid >64KB stack warning
-    sqz_init(&decoder);
+    sqz_init(&decoder, null, 0);
     decoder.that = &in;
     decoder.rc.read = get;
     read_header(&in, &bytes);
