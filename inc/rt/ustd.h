@@ -30,7 +30,7 @@
 #define assert(...)     rt_assert(__VA_ARGS__)
 #endif
 
-#define countof(a) rt_countof(a)
+#define countof(a)      rt_countof(a)
 #define max(a, b)       rt_max(a, b)
 #define min(a, b)       rt_min(a, b)
 #define swap(a, b)      rt_swap(a, b)

@@ -41,7 +41,7 @@ struct range_coder {
 struct map_entry {
     const uint8_t* data;
     uint64_t hash;
-    uint32_t bytes;
+    int32_t  bytes; // 0 empty, -1 removed
 };
 
 struct map {
@@ -52,24 +52,15 @@ struct map {
     uint32_t max_bytes;
 };
 
-struct eviction_queue {
-    int32_t positions[1u < sqz_max_win_bits]; // circular buffer of entry positions
-    int32_t start;                            // index oldest entry
-    int32_t end;                              // index to the next free slot
-    int32_t count;                            // number of valid entries
-};
-
 struct sqz { // range coder
     struct range_coder rc;
     void*  that;                    // convenience for caller i/o override
+    struct prob_model  pm_literal;  // 0..1
     struct prob_model  pm_size;     // size: 0..255
     struct prob_model  pm_byte;     // single byte
-    struct prob_model  pm_dist;     // number of bytes in distance - 1: 0,1,2
-    struct prob_model  pm_dist1;    // single byte distance
-    struct prob_model  pm_dist2[2];
-    struct prob_model  pm_dist3[3];
+    struct prob_model  pm_bits;     // 0..31 number of bits in distance
+    struct prob_model  pm_dist[32]; // 0..1 per bit distance probability
     struct map         map;         // caller supplied memory for map
-    struct eviction_queue eq;       // eviction queue
 };
 
 static_assert(offsetof(struct sqz, rc) == 0, "rc must be first field of sqz");
@@ -79,7 +70,7 @@ extern "C" {
 #endif
 
 void     sqz_init(struct sqz* s, struct map_entry entry[], size_t n);
-void     sqz_compress(struct sqz* s, const void* d, size_t b, uint16_t window);
+void     sqz_compress(struct sqz* s, const void* d, size_t b, uint32_t window);
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes);
 
 // Because in C arrays are indexed by both positive and negative index values

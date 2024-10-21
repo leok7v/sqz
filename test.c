@@ -7,7 +7,7 @@
 #define SQUEEZE_MAX_WINDOW
 
 #ifdef SQUEEZE_MAX_WINDOW // maximum window
-enum { window_bits = 15 }; // 32KB
+enum { window_bits = 16 }; // 32KB
 #elif defined(DEBUG) || defined(_DEBUG)
 enum { window_bits = 10 }; // 1KB
 #else
@@ -63,7 +63,7 @@ static errno_t compress(const char* from, const char* to,
         return out.error;
     }
     static struct sqz encoder; // static for testing, can be heap malloc()-ed
-    static struct map_entry me[1024 * 1024];
+    static struct map_entry me[32 * 1024 * 1024];
     encoder.that = &out;
     encoder.rc.write = put;
     sqz_init(&encoder, me, sizeof(me) / sizeof(me[0]));
