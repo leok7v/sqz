@@ -222,12 +222,11 @@ static int32_t map_put(struct sqz* s, const void* data, uint32_t b) {
 }
 
 static void map_best(struct sqz* s, const void* data, size_t bytes,
-                     uint32_t* distance, uint8_t* size, uint32_t window) {
+                     uint32_t* distance, uint8_t* size, uint32_t max_distance) {
     *size = 0;
     *distance = 0;
     struct map* m = &s->map;
     const uint8_t* d = (uint8_t*)data;
-    int32_t prev = -1; // previous result
     int32_t best = -1; // best (longest) result
     if (bytes >= sqz_min_len) {
         const uint32_t b = (uint32_t)(bytes < UINT32_MAX ? bytes : UINT32_MAX);
@@ -236,10 +235,9 @@ static void map_best(struct sqz* s, const void* data, size_t bytes,
         for (uint8_t i = 2; i < b - 1; i++) {
             hash = map_hash64_byte(hash, d[i]);
             int32_t r = map_get_hashed(m, hash, data, i + 1);
-            if (r != -1 && d - m->entry[r].data >= window) {
+            if (r != -1 && d - m->entry[r].data >= max_distance) {
                 map_remove(m, r);
             } else if (r != -1) {
-                if (prev != best) { prev = best; }
                 best = r;
             } else {
                 break;
@@ -248,7 +246,7 @@ static void map_best(struct sqz* s, const void* data, size_t bytes,
     }
     if (best >= 0) {
         *distance = (uint32_t)(d - m->entry[best].data);
-        assert(*distance < window);
+        assert(*distance < max_distance);
         uint32_t b = m->entry[best].bytes;
         const uint8_t* p0 = m->entry[best].data + b;
         const uint8_t* p1 = d + b;
@@ -261,21 +259,10 @@ static void map_best(struct sqz* s, const void* data, size_t bytes,
         }
         assert(ex <= sqz_max_len);
         *size = (uint8_t)ex;
-// if (prev >= 0 && prev != best) {
-//     uint32_t dist = (uint32_t)(d - m->entry[prev].data);
-//     if (dist != *distance) {
-//         printf("dist: %d bytes: %d %d bytes: %d\n", dist, m->entry[prev].bytes, *distance, ex);
-//     }
-// }
         if (ex != b) {
             assert(memcmp(m->entry[best].data, d, ex) == 0);
 //          printf("[%d] best_bytes: %d extended to: %d\n", best, b, ex);
             map_put(s, d, ex);
-        }
-        if (ex == 3 && *distance >= 0) {
-//          printf("bytes: %d distance: %d\n", ex, *distance);
-            *size = 0;
-            *distance = 0;
         }
     }
 }
@@ -486,7 +473,6 @@ static double sqz_entropy(uint64_t* freq, size_t n) { // Shannon entropy
 
 void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t window) {
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
-    // Initial error check for size overflow
     if (bytes > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
         s->rc.error = E2BIG;
         return;
@@ -511,28 +497,27 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
     while (i < bytes && s->rc.error == 0) {
         uint8_t  best_size = 0;
         uint32_t best_dist = 0;
-        // Use map_best() before O(n²) LZ search
-        map_best(s, d + i, bytes - i, &best_dist, &best_size, window);
-        if (best_size >= sqz_min_len) {
-            #ifdef SQUEEZE_MAP_STATS
-                map_distance_sum += best_dist;
-                map_len_sum += best_size;
-                map_count++;
-            #endif
+        if (s->map.n > 0) {
+            // Use map_best() before O(n²) LZ search
+            map_best(s, d + i, bytes - i, &best_dist, &best_size, window);
+            if (best_size >= sqz_min_len) {
+                #ifdef SQUEEZE_MAP_STATS
+                    map_distance_sum += best_dist;
+                    map_len_sum += best_size;
+                    map_count++;
+                #endif
+            }
         }
         // Perform O(n²) LZ search only if map_best() didn't find a match
         if (best_size < sqz_min_len && i >= sqz_min_len) {
             size_t j = i - 1;
             size_t min_j = i >= window ? i - window + 1 : 0;
-            // Perform back search in window
             for (;;) {
                 const size_t n = bytes - i;
                 size_t k = 0;
-                // Compare sequences
                 while (k < n && d[j + k] == d[i + k] && k < sqz_max_len) {
                     k++;
                 }
-                // Update best match if necessary
                 if (k >= sqz_min_len && k > best_size) {
                     best_size = (uint8_t)k;
                     best_dist = (uint32_t)(i - j);
@@ -544,9 +529,7 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
         }
         // reject back references that take too much compressed space:
         uint8_t bits = sqz_bits_of((uint32_t)best_dist);
-        // lit: 0.95 + size: 2.48 + dist bits: 3.35 ~= 6.78
-        if (best_size <= 3 && bits > 8) {
-//          printf("bytes: %d distance: %d(%d)\n", best_size, best_dist, bits);
+        if (best_size <= 3 && bits > 3) {
             best_size = 0;
             best_dist = 0;
             #ifdef SQUEEZE_MAP_STATS
@@ -580,11 +563,13 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
             // Otherwise encode literal byte
             rc_encode(&s->rc, &s->pm_literal, 1);
             rc_encode(&s->rc, &s->pm_byte, d[i]);
+#if 0 // makes it worse
             if (s->map.n > 0 && i >= sqz_min_len) {
-                map_put(s, d + i, 2); // 2-byte sequence
-                map_put(s, d + i, sqz_min_len); // 3 bytes
-                if (i + 3 < bytes) { map_put(s, d + i, 4); } // 4-bytes
+                if (i + 1 < bytes) { map_put(s, d + i, 2); }
+                if (i + 2 < bytes) { map_put(s, d + i, 3); }
+                if (i + 3 < bytes) { map_put(s, d + i, 4); }
             }
+#endif
             i++;
         }
     }

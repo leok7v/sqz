@@ -7,7 +7,7 @@
 #define SQUEEZE_MAX_WINDOW
 
 #ifdef SQUEEZE_MAX_WINDOW // maximum window
-enum { window_bits = 16 }; // 32KB
+enum { window_bits = 16 };
 #elif defined(DEBUG) || defined(_DEBUG)
 enum { window_bits = 10 }; // 1KB
 #else
@@ -91,10 +91,10 @@ static errno_t compress(const char* from, const char* to,
         double bps = out.written * 8.0   / bytes; // bits per symbol
         printf("bps: %4.1f ", bps);
         if (from != null) {
-            printf("%7lld -> %7lld %5.1f%% of \"%s\"\n\n",
+            printf("%7lld -> %7lld %6.2f%% of \"%s\"\n\n",
                   (uint64_t)bytes, out.written, pc, fn);
         } else {
-            printf("%7lld -> %7lld %5.1f%%\n\n",
+            printf("%7lld -> %7lld %6.2f%%\n\n",
                   (uint64_t)bytes, out.written, pc);
         }
     }
