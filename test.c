@@ -210,8 +210,11 @@ static errno_t locate_test_folder(void) {
     }
 }
 
+static void experiment(void);
+
 int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
+    experiment();
     rt_test_generics();
     printf("Compression Window: 2^%d %d bytes size_t: %d int: %d\n",
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int));
@@ -220,7 +223,7 @@ int main(int argc, const char* argv[]) {
         uint8_t data[4 * 1024] = {0};
         r = test(null, data, sizeof(data));
         // lz77 deals with run length encoding in amazing overlapped way
-        for (int32_t i = 0; i < sizeof(data); i += 4) {
+        for (size_t i = 0; i < sizeof(data); i += 4) {
             memcpy(data + i, "\x01\x02\x03\x04", 4);
         }
         r = test(null, data, sizeof(data));
@@ -254,4 +257,107 @@ int main(int argc, const char* argv[]) {
         }
     }
     return r;
+}
+
+///
+
+enum { window_size = 8 };
+
+struct binheap_node {
+    const uint8_t* data;
+    size_t dist;
+};
+
+struct binheap {
+    struct binheap_node nodes[window_size * window_size * 2];
+    size_t size;
+};
+
+#define binheap_swap(a, b) do { struct binheap_node temp = a; a = b; b = temp; } while (0)
+
+static void binheap_init(struct binheap* h) { h->size = 0; }
+
+static void binheap_up(struct binheap* h, size_t i) { // heapify up
+    size_t p = (i - 1) / 2; // parent
+    while (i > 0 && h->nodes[i].dist < h->nodes[p].dist) {
+        binheap_swap(h->nodes[i], h->nodes[p]);
+        i = p;
+        p = (i - 1) / 2;
+    }
+}
+
+static void binheap_down(struct binheap* h, size_t i) { // heapify down
+    size_t l  = 2 * i + 1;
+    size_t r = 2 * i + 2;
+    size_t s = i; // smallest
+    if (l < h->size && h->nodes[l].dist < h->nodes[s].dist) { s = l; }
+    if (r < h->size && h->nodes[r].dist < h->nodes[s].dist) { s = r; }
+    if (s != i) { binheap_swap(h->nodes[i], h->nodes[s]); binheap_down(h, s); }
+}
+
+static void binheap_insert(struct binheap* h, const uint8_t* p, size_t d) {
+    if (h->size < sizeof(h->nodes) / sizeof(h->nodes[0])) {
+        h->nodes[h->size].data = p;
+        h->nodes[h->size].dist = d;
+        binheap_up(h, h->size);
+        h->size++;
+        printf("size: %d\n", h->size);
+    } else {
+        // Heap overflow - ignore insertion
+        printf("binheap overflow\n");
+    }
+}
+
+static void binheap_evict(struct binheap* h, size_t pos) {
+    const size_t start = pos >= window_size ? pos - window_size : 0;
+    while (h->size > 0 && h->nodes[0].dist < start) {
+        h->nodes[0] = h->nodes[--h->size]; // extract and remove minimum
+        binheap_down(h, 0);
+    }
+    printf("size: %d\n", h->size);
+}
+
+static size_t binheap_find(struct binheap* h, const uint8_t* p, size_t maximum,
+                           size_t* distance) {
+    size_t size = 0;
+    size_t dist = 0;
+    for (size_t i = 0; i < h->size; i++) {
+        // maxumum bytes to compare:
+        const size_t m = window_size < maximum ? window_size : maximum;
+        size_t k = 0;
+        const uint8_t* d = h->nodes[i].data;
+        while (d[k] == p[k] && k < m) { k++; }
+        if (k > size) { size = k; dist = p - d; }
+    }
+    if (size > 0) { *distance = dist; }
+    return size;
+}
+
+static void pretty_print(struct binheap* h, size_t idx, size_t indent) {
+    if (idx >= h->size) { return; }
+    for (size_t i = 0; i < indent; i++) { printf("  "); }
+    printf("[%d] '%s':%u\n", idx, h->nodes[idx].data, h->nodes[idx].dist);
+    pretty_print(h, 2 * idx + 1, indent + 1);
+    pretty_print(h, 2 * idx + 2, indent + 1);
+}
+
+static void experiment(void) {
+    const char* s = "abcabcdabcdeabcdefabcdefgabcdefabcdeabcd";
+    const size_t n = strlen(s);
+    const uint8_t* data = (const uint8_t*)s;
+    struct binheap h;
+    binheap_init(&h);
+    for (size_t i = 0; i < n; i++) {
+        binheap_evict(&h, i);
+        size_t dist = 0;
+        size_t size = binheap_find(&h, &data[i], n - i, &dist);
+        if (size > 0) {
+            const uint8_t* match = data + i - dist;
+            printf("[%zu] '%.*s' %u:%d\n", i, size, match, dist, size);
+            assert(memcmp(match, &data[i], size) == 0);
+        }
+        binheap_insert(&h, &data[i], i);
+    }
+    pretty_print(&h, 0, 0);
+    exit(0);
 }
