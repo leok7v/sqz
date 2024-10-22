@@ -23,6 +23,22 @@ enum {
 // #define sqz_err_unsupported  40 // ENOSYS: Functionality not supported
 // #define sqz_err_no_space     55 // ENOBUFS: No buffer space available
 
+struct tree_node {
+    const  uint8_t*   data;
+    struct tree_node* ln;
+    struct tree_node* rn;
+    size_t  dist;
+    int32_t height;
+};
+
+struct tree {
+    struct tree_node* root;
+    struct tree_node  nodes[(1u << sqz_max_win_bits)];
+    struct tree_node* free_list;
+    size_t used;
+};
+
+
 struct prob_model  { // probability model
     uint64_t freq[256];
     uint64_t tree[256]; // Fenwick Tree (aka BITS)
@@ -55,6 +71,7 @@ struct map {
 struct sqz { // range coder
     struct range_coder rc;
     void*  that;                    // convenience for caller i/o override
+    struct tree        tree;
     struct prob_model  pm_literal;  // 0..1
     struct prob_model  pm_size;     // size: 0..255
     struct prob_model  pm_byte;     // single byte

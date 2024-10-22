@@ -3,8 +3,8 @@
 #include "sqz/sqz.h"
 #include "rt/rt_generics_test.h"
 
-#undef  SQUEEZE_MAX_WINDOW
 #define SQUEEZE_MAX_WINDOW
+#undef  SQUEEZE_MAX_WINDOW
 
 #ifdef SQUEEZE_MAX_WINDOW // maximum window
 enum { window_bits = 16 };
@@ -220,18 +220,18 @@ int main(int argc, const char* argv[]) {
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int));
     errno_t r = locate_test_folder();
     if (r == 0) {
-        uint8_t data[4 * 1024] = {0};
-        r = test(null, data, sizeof(data));
-        // lz77 deals with run length encoding in amazing overlapped way
-        for (size_t i = 0; i < sizeof(data); i += 4) {
-            memcpy(data + i, "\x01\x02\x03\x04", 4);
+        uint8_t d[4 * 1024] = {0};
+        r = test(null, d, sizeof(d));
+        // lz77 deals with run length encoding when overlapped
+        for (size_t i = 0; i < sizeof(d); i += 4) {
+            memcpy(d + i, "\x01\x02\x03\x04", 4);
         }
-        r = test(null, data, sizeof(data));
+        r = test(null, d, sizeof(d));
     }
     if (r == 0) {
-        const char* data = "Hello World Hello.World Hello World";
-        size_t bytes = strlen((const char*)data);
-        r = test(null, (const uint8_t*)data, bytes);
+        const char* d = "Hello World Hello.World Hello World";
+        size_t bytes = strlen((const char*)d);
+        r = test(null, (const uint8_t*)d, bytes);
     }
     if (r == 0 && file_exist(__FILE__)) { // test.c source code:
         r = test_compression(__FILE__);
@@ -260,104 +260,235 @@ int main(int argc, const char* argv[]) {
 }
 
 ///
+#if 0
 
-enum { window_size = 8 };
+enum { window = 8, min_size = 2, max_size = 254 };
 
-struct binheap_node {
-    const uint8_t* data;
-    size_t dist;
-};
-
-struct binheap {
-    struct binheap_node nodes[window_size * window_size * 2];
-    size_t size;
-};
-
-#define binheap_swap(a, b) do { struct binheap_node temp = a; a = b; b = temp; } while (0)
-
-static void binheap_init(struct binheap* h) { h->size = 0; }
-
-static void binheap_up(struct binheap* h, size_t i) { // heapify up
-    size_t p = (i - 1) / 2; // parent
-    while (i > 0 && h->nodes[i].dist < h->nodes[p].dist) {
-        binheap_swap(h->nodes[i], h->nodes[p]);
-        i = p;
-        p = (i - 1) / 2;
-    }
+static void tree_init(struct tree* t) {
+    t->used = 0;
+    t->root = NULL;
+    t->free_list = NULL;
 }
 
-static void binheap_down(struct binheap* h, size_t i) { // heapify down
-    size_t l  = 2 * i + 1;
-    size_t r = 2 * i + 2;
-    size_t s = i; // smallest
-    if (l < h->size && h->nodes[l].dist < h->nodes[s].dist) { s = l; }
-    if (r < h->size && h->nodes[r].dist < h->nodes[s].dist) { s = r; }
-    if (s != i) { binheap_swap(h->nodes[i], h->nodes[s]); binheap_down(h, s); }
-}
-
-static void binheap_insert(struct binheap* h, const uint8_t* p, size_t d) {
-    if (h->size < sizeof(h->nodes) / sizeof(h->nodes[0])) {
-        h->nodes[h->size].data = p;
-        h->nodes[h->size].dist = d;
-        binheap_up(h, h->size);
-        h->size++;
-        printf("size: %d\n", h->size);
+static struct tree_node* tree_alloc(struct tree* t) {
+    if (t->free_list == NULL) {
+        if (t->used >= sizeof(t->nodes) / sizeof(t->nodes[0])) {
+            printf("Tree pool overflow!\n");
+            return NULL;
+        }
+        return &t->nodes[t->used++];
     } else {
-        // Heap overflow - ignore insertion
-        printf("binheap overflow\n");
+        struct tree_node* n = t->free_list;
+        t->free_list = t->free_list->rn;
+        return n;
     }
 }
 
-static void binheap_evict(struct binheap* h, size_t pos) {
-    const size_t start = pos >= window_size ? pos - window_size : 0;
-    while (h->size > 0 && h->nodes[0].dist < start) {
-        h->nodes[0] = h->nodes[--h->size]; // extract and remove minimum
-        binheap_down(h, 0);
-    }
-    printf("size: %d\n", h->size);
+static inline void tree_free(struct tree* t, struct tree_node* n) {
+    n->rn = t->free_list;
+    t->free_list = n;
 }
 
-static size_t binheap_find(struct binheap* h, const uint8_t* p, size_t maximum,
-                           size_t* distance) {
-    size_t size = 0;
-    size_t dist = 0;
-    for (size_t i = 0; i < h->size; i++) {
-        // maxumum bytes to compare:
-        const size_t m = window_size < maximum ? window_size : maximum;
-        size_t k = 0;
-        const uint8_t* d = h->nodes[i].data;
-        while (d[k] == p[k] && k < m) { k++; }
-        if (k > size) { size = k; dist = p - d; }
-    }
-    if (size > 0) { *distance = dist; }
-    return size;
+static inline int tree_height(struct tree_node* n) {
+    return n != NULL ? n->height : 0;
 }
 
-static void pretty_print(struct binheap* h, size_t idx, size_t indent) {
-    if (idx >= h->size) { return; }
-    for (size_t i = 0; i < indent; i++) { printf("  "); }
-    printf("[%d] '%s':%u\n", idx, h->nodes[idx].data, h->nodes[idx].dist);
-    pretty_print(h, 2 * idx + 1, indent + 1);
-    pretty_print(h, 2 * idx + 2, indent + 1);
+static inline int tree_balance_factor(struct tree_node* n) {
+    return n != NULL ?
+        tree_height(n->ln) - tree_height(n->rn) : 0;
+}
+
+static inline void tree_update_height(struct tree_node* n) {
+    if (n != NULL) {
+        n->height =
+            1 + (tree_height(n->ln) > tree_height(n->rn) ?
+                 tree_height(n->ln) : tree_height(n->rn));
+    }
+}
+
+static int tree_node_count(struct tree_node* n) {
+    return n == NULL ? 0 :
+        1 + tree_node_count(n->ln) + tree_node_count(n->rn);
+}
+
+static inline struct tree_node* tree_rotate_right(struct tree_node* y) {
+    struct tree_node* x = y->ln; y->ln = x->rn; x->rn = y;
+    tree_update_height(y);
+    tree_update_height(x);
+    return x;
+}
+
+static inline struct tree_node* tree_rotate_left(struct tree_node* x) {
+    struct tree_node* y = x->rn; x->rn = y->ln; y->ln = x;
+    tree_update_height(x);
+    tree_update_height(y);
+    return y;
+}
+
+static struct tree_node* tree_balance(struct tree_node* n) {
+    tree_update_height(n);
+    int balance = tree_balance_factor(n);
+    if (balance > 1) {
+        if (tree_balance_factor(n->ln) < 0) {
+            n->ln = tree_rotate_left(n->ln);
+        }
+        return tree_rotate_right(n);
+    } else if (balance < -1) {
+        if (tree_balance_factor(n->rn) > 0) {
+            n->rn = tree_rotate_right(n->rn);
+        }
+        return tree_rotate_left(n);
+    }
+    return n;
+}
+
+static inline struct tree_node* tree_insert(struct tree* t,
+        struct tree_node* n, const uint8_t* p, size_t d) {
+    if (n == NULL) {
+        struct tree_node* new_node = tree_alloc(t);
+        if (new_node) {
+            new_node->data = p;
+            new_node->dist = d;
+            new_node->height = 1;
+            new_node->ln = new_node->rn = NULL;
+        }
+        return new_node;
+    }
+    if (d < n->dist) {
+        n->ln  = tree_insert(t, n->ln, p, d);
+    } else {
+        n->rn = tree_insert(t, n->rn, p, d);
+    }
+    return tree_balance(n);
+}
+
+static struct tree_node* tree_evict(struct tree* t, struct tree_node* n,
+                                    size_t start) {
+    if (n == NULL) { return NULL; }
+    if (n->dist < start) { // 's' sibling:
+        struct tree_node* s = n->rn != NULL ? n->rn : n->ln;
+        tree_free(t, n);
+        return s != NULL ? tree_balance(s) : NULL;
+    }
+    n->ln = tree_evict(t, n->ln, start);
+    n->rn = tree_evict(t, n->rn, start);
+    return tree_balance(n);
+}
+
+static void tree_find_recursive(struct tree_node* node, const uint8_t* p,
+                                size_t maximum,
+                                size_t* best_size, size_t* best_dist) {
+    if (node != NULL) {
+        const uint8_t* s = p;
+        const uint8_t* d = node->data;
+        const uint8_t* e = d + maximum;
+        while (d < e && *d == *s) { d++; s++; }
+        const size_t size = d - node->data;
+        const size_t dist = p - node->data;
+        assert(size <= max_size);
+        if (size > *best_size) {
+            *best_size = size;
+            *best_dist = dist;
+        } else if (size > 0 && size == *best_size) {
+            if (dist < *best_dist) {
+//              printf("best dist:size %u:%u := %u\n", (uint32_t)*best_dist,
+//                     (uint32_t)*best_size, (uint32_t)dist);
+                *best_dist = dist;
+            }
+        }
+        tree_find_recursive(node->ln, p, maximum, best_size, best_dist);
+        tree_find_recursive(node->rn, p, maximum, best_size, best_dist);
+    }
+}
+
+static inline void tree_find(struct tree* t, const uint8_t* p,
+                             size_t maximum, size_t* size, size_t* distance) {
+    *size = 0;
+    *distance = 0;
+    tree_find_recursive(t->root, p, maximum, size, distance);
+}
+
+static void pretty_print(struct tree_node* node, size_t indent) {
+    if (!node) return;
+    for (size_t i = 0; i < indent; i++) printf("  ");
+    printf("Node '%s':%zu\n", node->data, node->dist);
+    pretty_print(node->ln, indent + 1);
+    pretty_print(node->rn, indent + 1);
 }
 
 static void experiment(void) {
-    const char* s = "abcabcdabcdeabcdefabcdefgabcdefabcdeabcd";
-    const size_t n = strlen(s);
-    const uint8_t* data = (const uint8_t*)s;
-    struct binheap h;
-    binheap_init(&h);
-    for (size_t i = 0; i < n; i++) {
-        binheap_evict(&h, i);
+#if 1
+    const char* s = "abcabcdabcdeabcdefabcdefgabcdefabcdeabcd "
+                    "abcabcdabcdeabcdefabcdefgabcdefabcdeabcd";
+#else
+    const char* s = "0123012301230123012301230123012301230123";
+#endif
+    const size_t bytes = strlen(s);
+    const uint8_t* d = (const uint8_t*)s;
+    static struct tree t;
+    t.root = NULL;
+    tree_init(&t);
+    size_t i = 0;
+    while (i < bytes) {
         size_t dist = 0;
-        size_t size = binheap_find(&h, &data[i], n - i, &dist);
-        if (size > 0) {
-            const uint8_t* match = data + i - dist;
-            printf("[%zu] '%.*s' %u:%d\n", i, size, match, dist, size);
-            assert(memcmp(match, &data[i], size) == 0);
+        size_t size = 0;
+        tree_find(&t, d + i,
+                  bytes - i < max_size ? bytes - i : max_size,
+                 &size, &dist);
+//      printf("[%zu] insert('%.*s' %zu)\n", i, (int)(n - i), data + i, i);
+//      pretty_print(t.root, 0);
+        if (size >= min_size) { // ignore single byte matches
+            size_t best_size = 0;
+            size_t best_dist = 0;
+            size_t j = i - 1;
+            size_t min_j = i >= window ? i - window + 1 : 0;
+            for (;;) {
+                const size_t n = bytes - i;
+                size_t k = 0;
+                while (k < n && d[j + k] == d[i + k] && k < max_size) {
+                    k++;
+                }
+                if (k >= min_size && k > best_size) {
+                    best_size = (uint8_t)k;
+                    best_dist = (uint32_t)(i - j);
+                    if (best_size == max_size) break;
+                }
+                if (j == min_j) break;
+                j--;
+            }
+            const uint8_t* match0 = d + i - dist;
+            printf("[%zu] '%.*s' %zu:%zu tree\n", i, (int)size, match0, dist, size);
+            assert(memcmp(match0, d + i, size) == 0);
+            const uint8_t* match1 = d + i - best_dist;
+            printf("[%zu] '%.*s' %zu:%zu lz77\n", i, (int)size, match1, best_dist, best_size);
+            assert(dist == best_dist && size == best_size);
+            const size_t next = i + size;
+            while (i < next) {
+                const size_t ep = i + 1; // eviction point
+                size_t start = (ep >= window) ? ep - window + 1 : 0;
+                printf("[%u] tree_evict(start: %u)\n", i, start);
+                t.root = tree_evict(&t, t.root, start);
+                t.root = tree_insert(&t, t.root, d + i, i);
+                i = ep;
+            }
+        } else {
+            const size_t ep = i + 1; // eviction point
+            size_t start = (ep >= window) ? ep - window + 1 : 0;
+            printf("[%u] tree_evict(start: %u)\n", i, start);
+            t.root = tree_evict(&t, t.root, start);
+            t.root = tree_insert(&t, t.root, d + i, i);
+            i = ep;
         }
-        binheap_insert(&h, &data[i], i);
+        printf("tree_node_count(): %d\n", tree_node_count(t.root));
+        pretty_print(t.root, 0);
     }
-    pretty_print(&h, 0, 0);
-    exit(0);
+    printf("tree_node_count(): %d\n", tree_node_count(t.root));
+    if (t.root != NULL) { exit(0); }
 }
+
+#else
+
+static void experiment(void) {
+}
+
+#endif

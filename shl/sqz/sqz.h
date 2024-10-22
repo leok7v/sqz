@@ -23,6 +23,22 @@ enum {
 // #define sqz_err_unsupported  40 // ENOSYS: Functionality not supported
 // #define sqz_err_no_space     55 // ENOBUFS: No buffer space available
 
+struct tree_node {
+    const  uint8_t*   data;
+    struct tree_node* ln;
+    struct tree_node* rn;
+    size_t  dist;
+    int32_t height;
+};
+
+struct tree {
+    struct tree_node* root;
+    struct tree_node  nodes[(1u << sqz_max_win_bits)];
+    struct tree_node* free_list;
+    size_t used;
+};
+
+
 struct prob_model  { // probability model
     uint64_t freq[256];
     uint64_t tree[256]; // Fenwick Tree (aka BITS)
@@ -55,6 +71,7 @@ struct map {
 struct sqz { // range coder
     struct range_coder rc;
     void*  that;                    // convenience for caller i/o override
+    struct tree        tree;
     struct prob_model  pm_literal;  // 0..1
     struct prob_model  pm_size;     // size: 0..255
     struct prob_model  pm_byte;     // single byte
@@ -274,6 +291,150 @@ static void map_clear(struct map *m) {
     m->max_bytes = 0;
 }
 
+static void tree_init(struct tree* t) {
+    t->used = 0;
+    t->root = NULL;
+    t->free_list = NULL;
+}
+
+static struct tree_node* tree_alloc(struct tree* t) {
+    if (t->free_list == NULL) {
+        if (t->used >= sizeof(t->nodes) / sizeof(t->nodes[0])) {
+            printf("Tree pool overflow!\n");
+            return NULL;
+        }
+        return &t->nodes[t->used++];
+    } else {
+        struct tree_node* n = t->free_list;
+        t->free_list = t->free_list->rn;
+        return n;
+    }
+}
+
+static inline void tree_free(struct tree* t, struct tree_node* n) {
+    n->rn = t->free_list;
+    t->free_list = n;
+}
+
+static inline int tree_height(struct tree_node* n) {
+    return n != NULL ? n->height : 0;
+}
+
+static inline int tree_balance_factor(struct tree_node* n) {
+    return n != NULL ?
+        tree_height(n->ln) - tree_height(n->rn) : 0;
+}
+
+static inline void tree_update_height(struct tree_node* n) {
+    if (n != NULL) {
+        n->height =
+            1 + (tree_height(n->ln) > tree_height(n->rn) ?
+                 tree_height(n->ln) : tree_height(n->rn));
+    }
+}
+
+static int tree_node_count(struct tree_node* n) {
+    return n == NULL ? 0 :
+        1 + tree_node_count(n->ln) + tree_node_count(n->rn);
+}
+
+static inline struct tree_node* tree_rotate_right(struct tree_node* y) {
+    struct tree_node* x = y->ln; y->ln = x->rn; x->rn = y;
+    tree_update_height(y);
+    tree_update_height(x);
+    return x;
+}
+
+static inline struct tree_node* tree_rotate_left(struct tree_node* x) {
+    struct tree_node* y = x->rn; x->rn = y->ln; y->ln = x;
+    tree_update_height(x);
+    tree_update_height(y);
+    return y;
+}
+
+static struct tree_node* tree_balance(struct tree_node* n) {
+    tree_update_height(n);
+    int balance = tree_balance_factor(n);
+    if (balance > 1) {
+        if (tree_balance_factor(n->ln) < 0) {
+            n->ln = tree_rotate_left(n->ln);
+        }
+        return tree_rotate_right(n);
+    } else if (balance < -1) {
+        if (tree_balance_factor(n->rn) > 0) {
+            n->rn = tree_rotate_right(n->rn);
+        }
+        return tree_rotate_left(n);
+    }
+    return n;
+}
+
+static inline struct tree_node* tree_insert(struct tree* t,
+        struct tree_node* n, const uint8_t* p, size_t d) {
+    if (n == NULL) {
+        struct tree_node* new_node = tree_alloc(t);
+        if (new_node) {
+            new_node->data = p;
+            new_node->dist = d;
+            new_node->height = 1;
+            new_node->ln = new_node->rn = NULL;
+        }
+        return new_node;
+    }
+    if (d < n->dist) {
+        n->ln  = tree_insert(t, n->ln, p, d);
+    } else {
+        n->rn = tree_insert(t, n->rn, p, d);
+    }
+    return tree_balance(n);
+}
+
+static struct tree_node* tree_evict(struct tree* t,
+        struct tree_node* n, size_t start) {
+    if (n == NULL) { return NULL; }
+    if (n->dist < start) {
+        struct tree_node* temp = n->rn != NULL ? n->rn : n->ln;
+        tree_free(t, n);
+        return temp != NULL ? tree_balance(temp) : NULL;
+    }
+    n->ln = tree_evict(t, n->ln, start);
+    n->rn = tree_evict(t, n->rn, start);
+    return tree_balance(n);
+}
+
+static void tree_find_recursive(struct tree_node* node, const uint8_t* p,
+                                size_t maximum,
+                                size_t* best_size, size_t* best_dist) {
+    if (node != NULL) {
+        const uint8_t* s = p;
+        const uint8_t* d = node->data;
+        const uint8_t* e = d + maximum;
+        while (d < e && *d == *s) { d++; s++; }
+        const size_t size = d - node->data;
+        const size_t dist = p - node->data;
+        assert(size <= sqz_max_len);
+        if (size > *best_size) {
+            *best_size = size;
+            *best_dist = dist;
+        } else if (size > 0 && size == *best_size) {
+            if (dist < *best_dist) {
+//              printf("best dist:size %u:%u := %u\n", (uint32_t)*best_dist,
+//                     (uint32_t)*best_size, (uint32_t)dist);
+                *best_dist = dist;
+            }
+        }
+        tree_find_recursive(node->ln, p, maximum, best_size, best_dist);
+        tree_find_recursive(node->rn, p, maximum, best_size, best_dist);
+    }
+}
+
+static inline void tree_find(struct tree* t, const uint8_t* p,
+                             size_t maximum, size_t* size, size_t* distance) {
+    *size = 0;
+    *distance = 0;
+    tree_find_recursive(t->root, p, maximum, size, distance);
+}
+
 static inline uint8_t sqz_bits_of(uint32_t i) {
     uint8_t bits = 0;
     while (i > 0) { i >>= 1; bits++; }
@@ -446,6 +607,7 @@ void sqz_init(struct sqz* s, struct map_entry entry[], size_t n) {
     } else {
         memset(&s->map, 0, sizeof(s->map));
     }
+    tree_init(&s->tree);
 }
 
 #define SQUEEZE_MAP_STATS
@@ -472,6 +634,10 @@ static double sqz_entropy(uint64_t* freq, size_t n) { // Shannon entropy
 #endif
 
 void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t window) {
+
+
+s->map.n = 0;
+
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (bytes > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
         s->rc.error = E2BIG;
@@ -495,6 +661,7 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
         memset(size_histogram, 0, sizeof(size_histogram));
     #endif
     while (i < bytes && s->rc.error == 0) {
+        s->tree.root = tree_evict(&s->tree, s->tree.root, i > window ? i - window + 1 : 0);
         uint8_t  best_size = 0;
         uint32_t best_dist = 0;
         if (s->map.n > 0) {
@@ -527,6 +694,28 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
                 j--;
             }
         }
+if (i % (64 * 1024) == 0) { printf("%9d tree: %d\n", i, tree_node_count(s->tree.root)); }
+{
+        assert(sqz_max_len < window);
+        size_t tree_dist = 0;
+        size_t tree_size = 0;
+        tree_find(&s->tree, d + i,
+                  bytes - i < sqz_max_len ? bytes - i : sqz_max_len,
+                  &tree_size, &tree_dist);
+        if (tree_size > sqz_min_len) {
+            if (best_size != tree_size || best_dist != tree_dist) {
+                const uint8_t* match0 = d + i - tree_dist;
+//              printf("[%zu] %u:%d tree `%.*s`\n", i, tree_dist, tree_size, (int)tree_size, match0);
+                swear(memcmp(match0, d + i, tree_size) == 0);
+                const uint8_t* match1 = d + i - best_dist;
+//              printf("[%zu] %u:%d lz77 `%.*s\n`", i, best_dist, best_size, (int)best_size, match1);
+                swear(memcmp(match1, d + i, best_size) == 0);
+                printf("[%zu] %5u:%3u tree %5u:%3u lz77\n", i,
+                       tree_dist, tree_size, best_dist, best_size);
+            }
+        }
+}
+
         // reject back references that take too much compressed space:
         uint8_t bits = sqz_bits_of((uint32_t)best_dist);
         if (best_size <= 3 && bits > 3) {
@@ -536,6 +725,7 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
             rejections++;
             #endif
         }
+//      printf("[%zu] insert('%.*s' %zu)\n", i, (int)(bytes - i), d + i, i);
         if (best_size >= sqz_min_len) {
             rc_encode(&s->rc, &s->pm_literal, 0);
             rc_encode(&s->rc, &s->pm_size, (uint8_t)best_size);
@@ -549,7 +739,15 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
                 distance >>= 1;
             }
             if (s->map.n > 0) { map_put(s, d + i, (uint32_t)best_size); }
-            i += best_size; // Move forward
+            size_t next = i + best_size;
+            while (i < next) {
+                const size_t ep = i + 1; // eviction point
+                size_t start = (ep >= window) ? ep - window + 1 : 0;
+//              printf("[%u] tree_evict(start: %u)\n", i, start);
+                s->tree.root = tree_evict(&s->tree, s->tree.root, start);
+                s->tree.root = tree_insert(&s->tree, s->tree.root, d + i, i);
+                i = ep;
+            }
             #ifdef SQUEEZE_MAP_STATS
                 br_bytes += best_size;
                 if (best_dist > 0) {
@@ -570,7 +768,12 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
                 if (i + 3 < bytes) { map_put(s, d + i, 4); }
             }
 #endif
-            i++;
+            const size_t ep = i + 1; // eviction point
+            size_t start = (ep >= window) ? ep - window + 1 : 0;
+//          printf("[%u] tree_evict(start: %u)\n", i, start);
+            s->tree.root = tree_evict(&s->tree, s->tree.root, start);
+            s->tree.root = tree_insert(&s->tree, s->tree.root, d + i, i);
+            i = ep;
         }
     }
     rc_encode(&s->rc, &s->pm_literal, 0);
