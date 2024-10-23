@@ -27,13 +27,13 @@ struct tree_node {
     const  uint8_t*   data;
     struct tree_node* ln;
     struct tree_node* rn;
-    size_t  dist;
+    size_t  dist;  // TODO: remove me - absolutely unnecessary
     int32_t height;
 };
 
 struct tree {
     struct tree_node* root;
-    struct tree_node  nodes[(1u << sqz_max_win_bits)];
+    struct tree_node  nodes[(1u << sqz_max_win_bits) * 2 + 1];
     struct tree_node* free_list;
     size_t used;
 };
@@ -278,7 +278,7 @@ static void map_best(struct sqz* s, const void* data, size_t bytes,
         *size = (uint8_t)ex;
         if (ex != b) {
             assert(memcmp(m->entry[best].data, d, ex) == 0);
-//          printf("[%d] best_bytes: %d extended to: %d\n", best, b, ex);
+            printf("[%d] best_bytes: %d extended to: %d\n", best, b, ex);
             map_put(s, d, ex);
         }
     }
@@ -291,6 +291,15 @@ static void map_clear(struct map *m) {
     m->max_bytes = 0;
 }
 
+
+static void pretty_print(struct tree_node* node, size_t indent) {
+    if (!node) return;
+    for (size_t i = 0; i < indent; i++) printf("  ");
+    printf("Node '%s':%zu\n", node->data, node->dist);
+    pretty_print(node->ln, indent + 1);
+    pretty_print(node->rn, indent + 1);
+}
+
 static void tree_init(struct tree* t) {
     t->used = 0;
     t->root = NULL;
@@ -300,7 +309,8 @@ static void tree_init(struct tree* t) {
 static struct tree_node* tree_alloc(struct tree* t) {
     if (t->free_list == NULL) {
         if (t->used >= sizeof(t->nodes) / sizeof(t->nodes[0])) {
-            printf("Tree pool overflow!\n");
+            printf("Tree pool overflow %u\n",
+                   sizeof(t->nodes) / sizeof(t->nodes[0]));
             return NULL;
         }
         return &t->nodes[t->used++];
@@ -333,7 +343,7 @@ static inline void tree_update_height(struct tree_node* n) {
     }
 }
 
-static int tree_node_count(struct tree_node* n) {
+static size_t tree_node_count(struct tree_node* n) {
     return n == NULL ? 0 :
         1 + tree_node_count(n->ln) + tree_node_count(n->rn);
 }
@@ -369,42 +379,63 @@ static struct tree_node* tree_balance(struct tree_node* n) {
     return n;
 }
 
-static inline struct tree_node* tree_insert(struct tree* t,
-        struct tree_node* n, const uint8_t* p, size_t d) {
-    if (n == NULL) {
-        struct tree_node* new_node = tree_alloc(t);
-        if (new_node) {
-            new_node->data = p;
-            new_node->dist = d;
-            new_node->height = 1;
-            new_node->ln = new_node->rn = NULL;
-        }
-        return new_node;
-    }
-    if (d < n->dist) {
-        n->ln  = tree_insert(t, n->ln, p, d);
-    } else {
-        n->rn = tree_insert(t, n->rn, p, d);
-    }
-    return tree_balance(n);
+static size_t evict_count;
+static size_t insert_count;
+
+static struct tree_node* leftmost(struct tree_node* n) {
+    while (n->ln != NULL) { n = n->ln; }
+    return n;
 }
 
-static struct tree_node* tree_evict(struct tree* t,
-        struct tree_node* n, size_t start) {
-    if (n == NULL) { return NULL; }
-    if (n->dist < start) {
-        struct tree_node* temp = n->rn != NULL ? n->rn : n->ln;
-        tree_free(t, n);
-        return temp != NULL ? tree_balance(temp) : NULL;
+static struct tree_node* tree_evict(struct tree* t, struct tree_node* n,
+                                    size_t start) {
+    if (n != NULL) {
+        if (n->dist < start) {
+            evict_count++;
+            struct tree_node* s = n->rn != NULL ? n->rn : n->ln;
+            if (n->rn != NULL) { leftmost(s)->ln = n->ln; }
+            tree_free(t, n);
+            n = s;
+        } else {
+            n->ln = tree_evict(t, n->ln, start);
+            n->rn = tree_evict(t, n->rn, start);
+        }
     }
-    n->ln = tree_evict(t, n->ln, start);
-    n->rn = tree_evict(t, n->rn, start);
-    return tree_balance(n);
+    return n != NULL ? tree_balance(n) : NULL;
 }
+
+static inline struct tree_node* tree_insert(struct tree* t,
+        struct tree_node* n, const uint8_t* p,
+        size_t maximum, size_t d) {
+    if (n == NULL) {
+        n = tree_alloc(t);
+        insert_count++;
+        if (n != NULL) {
+            n->data = p;
+            n->dist = d;
+            n->height = 1;
+            n->ln = n->rn = NULL;
+        }
+    } else {
+        int cmp = memcmp(p, n->data, maximum);
+        if (cmp < 0) {
+            n->ln = tree_insert(t, n->ln, p, maximum, d);
+        } else {
+            n->rn = tree_insert(t, n->rn, p, maximum, d);
+        }
+        n = tree_balance(n);
+    }
+    return n;
+}
+
+static bool tree_find_recursive_debug;
 
 static void tree_find_recursive(struct tree_node* node, const uint8_t* p,
                                 size_t maximum,
                                 size_t* best_size, size_t* best_dist) {
+    if (tree_find_recursive_debug) {
+        printf("%.4s\n", p);
+    }
     if (node != NULL) {
         const uint8_t* s = p;
         const uint8_t* d = node->data;
@@ -412,19 +443,47 @@ static void tree_find_recursive(struct tree_node* node, const uint8_t* p,
         while (d < e && *d == *s) { d++; s++; }
         const size_t size = d - node->data;
         const size_t dist = p - node->data;
-        assert(size <= sqz_max_len);
+        if (tree_find_recursive_debug) {
+            printf("Node: `%.16s...` .dist:%d %d:%d\n", node->data, node->dist, dist, size);
+        }
         if (size > *best_size) {
+//          printf("New best match dist:size %u:%u := %u:%u\n", (uint32_t)*best_dist,
+//                  (uint32_t)*best_size, (uint32_t)size, (uint32_t)dist);
             *best_size = size;
             *best_dist = dist;
         } else if (size > 0 && size == *best_size) {
             if (dist < *best_dist) {
-//              printf("best dist:size %u:%u := %u\n", (uint32_t)*best_dist,
-//                     (uint32_t)*best_size, (uint32_t)dist);
+//              printf("Improved match dist:size %u:%u := %u\n", (uint32_t)*best_dist,
+//                      (uint32_t)*best_size, (uint32_t)dist);
                 *best_dist = dist;
             }
         }
-        tree_find_recursive(node->ln, p, maximum, best_size, best_dist);
-        tree_find_recursive(node->rn, p, maximum, best_size, best_dist);
+#if 0
+        if (*best_size < max_size && d < e) {
+            int compare = ((int8_t)*s) - ((int8_t)*d);
+            assert(compare != 0);
+            bool left = compare < 0 ||
+                *best_size > 0 && node->ln != NULL &&
+                (size_t)(p - node->ln->data) < *best_dist &&
+                memcmp(node->ln->data, p, *best_size) == 0;
+            bool right = compare > 0 ||
+               *best_size > 0 && node->rn != NULL &&
+                (size_t)(p - node->rn->data) < *best_dist &&
+                memcmp(node->rn->data, p, *best_size) == 0;
+            if (left) {
+                if (tree_find_recursive_debug) printf("Left\n");
+                tree_find_recursive(node->ln, p, maximum, best_size, best_dist);
+            }
+            if (right) {
+                if (tree_find_recursive_debug) printf("Right\n");
+                tree_find_recursive(node->rn, p, maximum, best_size, best_dist);
+            }
+        }
+#endif
+        if (*best_size < sqz_max_len) {
+            tree_find_recursive(node->ln, p, maximum, best_size, best_dist);
+            tree_find_recursive(node->rn, p, maximum, best_size, best_dist);
+        }
     }
 }
 
@@ -635,8 +694,9 @@ static double sqz_entropy(uint64_t* freq, size_t n) { // Shannon entropy
 
 void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t window) {
 
-
 s->map.n = 0;
+evict_count = 0;
+insert_count = 0;
 
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (bytes > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
@@ -661,22 +721,29 @@ s->map.n = 0;
         memset(size_histogram, 0, sizeof(size_histogram));
     #endif
     while (i < bytes && s->rc.error == 0) {
-        s->tree.root = tree_evict(&s->tree, s->tree.root, i > window ? i - window + 1 : 0);
-        uint8_t  best_size = 0;
-        uint32_t best_dist = 0;
+        const size_t maximum = bytes - i < sqz_max_len ? bytes - i : sqz_max_len;
+        uint8_t  map_size = 0;
+        uint32_t map_dist = 0;
         if (s->map.n > 0) {
             // Use map_best() before O(n²) LZ search
-            map_best(s, d + i, bytes - i, &best_dist, &best_size, window);
-            if (best_size >= sqz_min_len) {
+            map_best(s, d + i, bytes - i, &map_dist, &map_size, window);
+            if (map_size >= sqz_min_len) {
                 #ifdef SQUEEZE_MAP_STATS
-                    map_distance_sum += best_dist;
-                    map_len_sum += best_size;
+                    map_distance_sum += map_dist;
+                    map_len_sum += map_size;
                     map_count++;
                 #endif
             }
         }
+
+#undef  SQZ_NO_COMPARE_TO_LZ77
+#define SQZ_NO_COMPARE_TO_LZ77
+
+#ifndef SQZ_NO_COMPARE_TO_LZ77
+        uint8_t  lz77_size = map_size;
+        uint32_t lz77_dist = map_dist;
         // Perform O(n²) LZ search only if map_best() didn't find a match
-        if (best_size < sqz_min_len && i >= sqz_min_len) {
+        if (map_size < sqz_min_len && i >= 1) {
             size_t j = i - 1;
             size_t min_j = i >= window ? i - window + 1 : 0;
             for (;;) {
@@ -685,37 +752,38 @@ s->map.n = 0;
                 while (k < n && d[j + k] == d[i + k] && k < sqz_max_len) {
                     k++;
                 }
-                if (k >= sqz_min_len && k > best_size) {
-                    best_size = (uint8_t)k;
-                    best_dist = (uint32_t)(i - j);
-                    if (best_size == sqz_max_len) break;
+                if (k >= sqz_min_len && k > lz77_size) {
+                    lz77_size = (uint8_t)k;
+                    lz77_dist = (uint32_t)(i - j);
+                    if (lz77_size == sqz_max_len) break;
                 }
                 if (j == min_j) break;
                 j--;
             }
         }
-if (i % (64 * 1024) == 0) { printf("%9d tree: %d\n", i, tree_node_count(s->tree.root)); }
-{
+#endif
+if (i % (128 * 1024) == 0) { printf("%9d tree: %d\n", i, tree_node_count(s->tree.root)); }
         assert(sqz_max_len < window);
-        size_t tree_dist = 0;
-        size_t tree_size = 0;
-        tree_find(&s->tree, d + i,
-                  bytes - i < sqz_max_len ? bytes - i : sqz_max_len,
-                  &tree_size, &tree_dist);
-        if (tree_size > sqz_min_len) {
-            if (best_size != tree_size || best_dist != tree_dist) {
-                const uint8_t* match0 = d + i - tree_dist;
-//              printf("[%zu] %u:%d tree `%.*s`\n", i, tree_dist, tree_size, (int)tree_size, match0);
-                swear(memcmp(match0, d + i, tree_size) == 0);
-                const uint8_t* match1 = d + i - best_dist;
-//              printf("[%zu] %u:%d lz77 `%.*s\n`", i, best_dist, best_size, (int)best_size, match1);
-                swear(memcmp(match1, d + i, best_size) == 0);
+        size_t best_dist = 0;
+        size_t best_size = 0;
+//      tree_find_recursive_debug = i == 69;
+        tree_find(&s->tree, d + i, maximum, &best_size, &best_dist);
+#ifndef SQZ_NO_COMPARE_TO_LZ77
+        if (lz77_size >= sqz_min_len || best_size >= sqz_min_len) {
+            if (lz77_size != best_size || lz77_dist != best_dist) {
+                const uint8_t* match0 = d + i - best_dist;
+                printf("[%zu] %5u:%3d tree `%.*s`\n", i, best_dist, best_size, (int)best_size, match0);
+                swear(memcmp(match0, d + i, best_size) == 0);
+                const uint8_t* match1 = d + i - lz77_dist;
+                printf("[%zu] %5u:%3d lz77 `%.*s\n`", i, lz77_dist, lz77_size, (int)lz77_size, match1);
+                swear(memcmp(match1, d + i, lz77_size) == 0);
                 printf("[%zu] %5u:%3u tree %5u:%3u lz77\n", i,
-                       tree_dist, tree_size, best_dist, best_size);
+                       best_dist, best_size, lz77_dist, lz77_size);
+                pretty_print(s->tree.root, 0);
+                swear(lz77_size == best_size && lz77_dist == best_dist);
             }
         }
-}
-
+#endif
         // reject back references that take too much compressed space:
         uint8_t bits = sqz_bits_of((uint32_t)best_dist);
         if (best_size <= 3 && bits > 3) {
@@ -741,12 +809,18 @@ if (i % (64 * 1024) == 0) { printf("%9d tree: %d\n", i, tree_node_count(s->tree.
             if (s->map.n > 0) { map_put(s, d + i, (uint32_t)best_size); }
             size_t next = i + best_size;
             while (i < next) {
-                const size_t ep = i + 1; // eviction point
-                size_t start = (ep >= window) ? ep - window + 1 : 0;
-//              printf("[%u] tree_evict(start: %u)\n", i, start);
-                s->tree.root = tree_evict(&s->tree, s->tree.root, start);
-                s->tree.root = tree_insert(&s->tree, s->tree.root, d + i, i);
-                i = ep;
+                size_t ic = insert_count;
+                s->tree.root = tree_insert(&s->tree, s->tree.root,
+                                           d + i, maximum, i);
+                assert(ic + 1 == insert_count);
+                i++;
+                if (i < bytes) {
+                    size_t start = (i >= window) ? i - window + 1 : 0;
+//                  printf("[%u] tree_evict(start: %u)\n", i, start);
+                    size_t ec = evict_count;
+                    s->tree.root = tree_evict(&s->tree, s->tree.root, start);
+                    if (start > 0) { assert(ec + 1 == evict_count); }
+                }
             }
             #ifdef SQUEEZE_MAP_STATS
                 br_bytes += best_size;
@@ -768,12 +842,18 @@ if (i % (64 * 1024) == 0) { printf("%9d tree: %d\n", i, tree_node_count(s->tree.
                 if (i + 3 < bytes) { map_put(s, d + i, 4); }
             }
 #endif
-            const size_t ep = i + 1; // eviction point
-            size_t start = (ep >= window) ? ep - window + 1 : 0;
-//          printf("[%u] tree_evict(start: %u)\n", i, start);
-            s->tree.root = tree_evict(&s->tree, s->tree.root, start);
-            s->tree.root = tree_insert(&s->tree, s->tree.root, d + i, i);
-            i = ep;
+            size_t ic = insert_count;
+            s->tree.root = tree_insert(&s->tree, s->tree.root,
+                                       d + i, maximum, i);
+            assert(ic + 1 == insert_count);
+            i++;
+            if (i < bytes) {
+                size_t start = (i >= window) ? i - window + 1 : 0;
+//              printf("[%u] tree_evict(start: %u)\n", i, start);
+                size_t ec = evict_count;
+                s->tree.root = tree_evict(&s->tree, s->tree.root, start);
+                if (start > 0) { assert(ec + 1 == evict_count); }
+            }
         }
     }
     rc_encode(&s->rc, &s->pm_literal, 0);

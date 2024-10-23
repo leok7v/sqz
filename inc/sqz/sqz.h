@@ -27,13 +27,13 @@ struct tree_node {
     const  uint8_t*   data;
     struct tree_node* ln;
     struct tree_node* rn;
-    size_t  dist;
+    size_t  dist;  // TODO: remove me - absolutely unnecessary
     int32_t height;
 };
 
 struct tree {
     struct tree_node* root;
-    struct tree_node  nodes[(1u << sqz_max_win_bits)];
+    struct tree_node  nodes[(1u << sqz_max_win_bits) * 2 + 1];
     struct tree_node* free_list;
     size_t used;
 };
