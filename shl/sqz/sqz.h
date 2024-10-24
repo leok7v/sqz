@@ -27,13 +27,11 @@ struct tree_node {
     const  uint8_t*   data;
     struct tree_node* ln;
     struct tree_node* rn;
-    size_t  dist;  // TODO: remove me - absolutely unnecessary
-    int32_t height;
 };
 
 struct tree {
     struct tree_node* root;
-    struct tree_node  nodes[(1u << sqz_max_win_bits) * 2 + 1];
+    struct tree_node  nodes[(1u << sqz_max_win_bits)];
     struct tree_node* free_list;
     size_t used;
 };
@@ -68,7 +66,7 @@ struct map {
     uint32_t max_bytes;
 };
 
-struct sqz { // range coder
+struct sqz {
     struct range_coder rc;
     void*  that;                    // convenience for caller i/o override
     struct tree        tree;
@@ -291,7 +289,7 @@ static void map_clear(struct map *m) {
     m->max_bytes = 0;
 }
 
-
+#if 0
 static void pretty_print(struct tree_node* node, size_t indent) {
     if (!node) return;
     for (size_t i = 0; i < indent; i++) printf("  ");
@@ -493,6 +491,7 @@ static inline void tree_find(struct tree* t, const uint8_t* p,
     *distance = 0;
     tree_find_recursive(t->root, p, maximum, size, distance);
 }
+#endif
 
 static inline uint8_t sqz_bits_of(uint32_t i) {
     uint8_t bits = 0;
@@ -666,7 +665,7 @@ void sqz_init(struct sqz* s, struct map_entry entry[], size_t n) {
     } else {
         memset(&s->map, 0, sizeof(s->map));
     }
-    tree_init(&s->tree);
+//  tree_init(&s->tree);
 }
 
 #define SQUEEZE_MAP_STATS
@@ -693,11 +692,7 @@ static double sqz_entropy(uint64_t* freq, size_t n) { // Shannon entropy
 #endif
 
 void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t window) {
-
 s->map.n = 0;
-evict_count = 0;
-insert_count = 0;
-
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (bytes > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
         s->rc.error = E2BIG;
@@ -721,7 +716,7 @@ insert_count = 0;
         memset(size_histogram, 0, sizeof(size_histogram));
     #endif
     while (i < bytes && s->rc.error == 0) {
-        const size_t maximum = bytes - i < sqz_max_len ? bytes - i : sqz_max_len;
+//      const size_t maximum = bytes - i < sqz_max_len ? bytes - i : sqz_max_len;
         uint8_t  map_size = 0;
         uint32_t map_dist = 0;
         if (s->map.n > 0) {
@@ -762,12 +757,11 @@ insert_count = 0;
             }
         }
 #endif
-if (i % (128 * 1024) == 0) { printf("%9d tree: %d\n", i, tree_node_count(s->tree.root)); }
         assert(sqz_max_len < window);
         size_t best_dist = 0;
         size_t best_size = 0;
 //      tree_find_recursive_debug = i == 69;
-        tree_find(&s->tree, d + i, maximum, &best_size, &best_dist);
+//      tree_find(&s->tree, d + i, maximum, &best_size, &best_dist);
 #ifndef SQZ_NO_COMPARE_TO_LZ77
         if (lz77_size >= sqz_min_len || best_size >= sqz_min_len) {
             if (lz77_size != best_size || lz77_dist != best_dist) {
@@ -809,17 +803,13 @@ if (i % (128 * 1024) == 0) { printf("%9d tree: %d\n", i, tree_node_count(s->tree
             if (s->map.n > 0) { map_put(s, d + i, (uint32_t)best_size); }
             size_t next = i + best_size;
             while (i < next) {
-                size_t ic = insert_count;
-                s->tree.root = tree_insert(&s->tree, s->tree.root,
-                                           d + i, maximum, i);
-                assert(ic + 1 == insert_count);
+//              s->tree.root = tree_insert(&s->tree, s->tree.root,
+//                                         d + i, maximum, i);
                 i++;
                 if (i < bytes) {
-                    size_t start = (i >= window) ? i - window + 1 : 0;
+//                  size_t start = (i >= window) ? i - window + 1 : 0;
 //                  printf("[%u] tree_evict(start: %u)\n", i, start);
-                    size_t ec = evict_count;
-                    s->tree.root = tree_evict(&s->tree, s->tree.root, start);
-                    if (start > 0) { assert(ec + 1 == evict_count); }
+//                  s->tree.root = tree_evict(&s->tree, s->tree.root, start);
                 }
             }
             #ifdef SQUEEZE_MAP_STATS
@@ -842,17 +832,13 @@ if (i % (128 * 1024) == 0) { printf("%9d tree: %d\n", i, tree_node_count(s->tree
                 if (i + 3 < bytes) { map_put(s, d + i, 4); }
             }
 #endif
-            size_t ic = insert_count;
-            s->tree.root = tree_insert(&s->tree, s->tree.root,
-                                       d + i, maximum, i);
-            assert(ic + 1 == insert_count);
+//          s->tree.root = tree_insert(&s->tree, s->tree.root,
+//                                     d + i, maximum, i);
             i++;
             if (i < bytes) {
-                size_t start = (i >= window) ? i - window + 1 : 0;
+//              size_t start = (i >= window) ? i - window + 1 : 0;
 //              printf("[%u] tree_evict(start: %u)\n", i, start);
-                size_t ec = evict_count;
-                s->tree.root = tree_evict(&s->tree, s->tree.root, start);
-                if (start > 0) { assert(ec + 1 == evict_count); }
+//              s->tree.root = tree_evict(&s->tree, s->tree.root, start);
             }
         }
     }
