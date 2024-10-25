@@ -192,13 +192,9 @@ static const struct tree_node* tree_max_size(const struct sqz* s,
                     *size = len;
                     *dist = dst;
                     r = n;
-assert(*dist == (size_t)(p - r->data));
-                    assert(memcmp(p, p - *dist, *size) == 0);
                 } else if (len == *size && dst < *dist) {
                     *dist = dst;
                     r = n;
-assert(*dist == (size_t)(p - r->data));
-                    assert(memcmp(p, p - *dist, *size) == 0);
                 }
 //              printf("best size: %zd dst: %zd\n", *size, *dst);
                 r = tree_max_size(s, n->ln, r, p, bytes, size, dist);
@@ -210,56 +206,28 @@ assert(*dist == (size_t)(p - r->data));
             }
         }
     }
-    if (r != NULL) {
-assert(*dist == (size_t)(p - r->data) && *dist != 0);
-    } else {
-assert(*dist == 0);
-    }
     return r;
 }
 
 static inline void tree_min_dist(const struct tree_node* n,
                                  const uint8_t* p,
                                  size_t* size, size_t* dist) {
-    assert(*size <= sqz_max_size);
-    assert(memcmp(p, p - *dist, *size) == 0);
-    // Initialize minimal distance to the distance found so far
     size_t min_dist = *dist;
-    const struct tree_node* best_node = n; // TODO - don't need it at all
-    // Check nodes to the left (predecessors)
     const struct tree_node* node = tree_prev(n);
-    while (node != NULL) {
+    while (node != NULL && memcmp(p, node->data, *size) == 0) {
         tree_nodes_walked++;
-        if (memcmp(p, node->data, *size) == 0) {
-            size_t curr_dist = p - node->data;
-            if (curr_dist < min_dist) {
-                min_dist  = curr_dist;
-                best_node = node;
-            }
-        } else {
-            break;
-        }
+        size_t dst = p - node->data;
+        if (dst < min_dist) { min_dist  = dst; }
         node = tree_prev(node);
     }
-    // Check nodes to the right (successors)
     node = tree_next(n);
-    while (node != NULL) {
+    while (node != NULL && memcmp(p, node->data, *size) == 0) {
         tree_nodes_walked++;
-        if (memcmp(p, node->data, *size) == 0) {
-            size_t curr_dist = p - node->data;
-            if (curr_dist < min_dist) {
-                min_dist  = curr_dist;
-                best_node = node;
-            }
-        } else {
-            break;
-        }
+        size_t dst = p - node->data;
+        if (dst < min_dist) { min_dist  = dst; }
         node = tree_next(node);
     }
-    // Update *dist to the minimal distance found
-    assert((size_t)(p - best_node->data) == min_dist);
-    *dist = p - best_node->data;
-    assert(memcmp(p, p - *dist, *size) == 0);
+    *dist = min_dist;
 }
 
 // returns the size of the longest match and the distance to it
@@ -272,17 +240,15 @@ static inline void tree_find(const struct sqz* s, const uint8_t* p,
     const struct tree* t = &s->tree;
     tree_nodes_walked = 0;
     const struct tree_node* n = tree_max_size(s, t->root, NULL, p, bytes, size, dist);
-    size_t walked = tree_nodes_walked;
+//  size_t walked = tree_nodes_walked;
     if (sqz_min_size <= *size) {
         assert(*size <= sqz_max_size);
         tree_nodes_walked = 0;
-        assert(memcmp(p, p - *dist, *size) == 0);
         tree_min_dist(n, p, size, dist);
-        assert(memcmp(p, p - *dist, *size) == 0);
-        printf("tree_max_size(): %d tree_min_dist(): %d nodes\n",
-                walked, tree_nodes_walked);
+//      printf("tree_max_size(): %d tree_min_dist(): %d nodes\n",
+//              walked, tree_nodes_walked);
     } else {
-        printf("tree_max_size(): %d\n", walked);
+//      printf("tree_max_size(): %d\n", walked);
     }
 }
 
