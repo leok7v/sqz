@@ -5,9 +5,9 @@ enum { sqz_max_win_bits = 16, sqz_max_win = 1u << sqz_max_win_bits };
 
 struct tree_node {
     const  uint8_t*   data;
-    struct tree_node* ln; // left   node
-    struct tree_node* rn; // right  node
-    struct tree_node* pn; // parent node
+    struct tree_node* ln;  // left   node
+    struct tree_node* rn;  // right  node
+    struct tree_node* pn;  // parent node
 };
 
 struct tree {
@@ -20,6 +20,40 @@ struct sqz {
     size_t             window;
     struct tree        tree;
 };
+
+static void tree_init(struct tree* t) {
+    t->pos = 0;
+    t->root = NULL;
+    memset(t->nodes, 0, sizeof(t->nodes));
+}
+
+static inline struct tree_node* tree_successor(struct tree_node* n) {
+    while (n->ln != NULL) { n = n->ln; }
+    return n;
+}
+static inline const struct tree_node* tree_prev(const struct tree_node* n) {
+    // in-order predecessor
+    if (n->ln != NULL) {
+        n = n->ln;
+        while (n->rn != NULL) { n = n->rn; }
+    } else {
+        while (n->pn != NULL && n == n->pn->ln) { n = n->pn; }
+        n = n->pn;
+    }
+    return n;
+}
+
+static inline const struct tree_node* tree_next(const struct tree_node* n) {
+    // in-order successor:
+    if (n->rn != NULL) {
+        n = n->rn;
+        while (n->ln != NULL) { n = n->ln; }
+    } else {
+        while (n->pn != NULL && n == n->pn->rn) { n = n->pn; }
+        n = n->pn;
+    }
+    return n;
+}
 
 static size_t tree_node_count(const struct tree_node* n) {
     return n == NULL ? 0 :
@@ -61,20 +95,8 @@ static void tree_print(const struct tree* t, const uint8_t* p) {
     printf("%zd nodes\n\n", tree_node_count(t->root));
 }
 
-
-static void tree_init(struct tree* t) {
-    t->pos = 0;
-    t->root = NULL;
-    memset(t->nodes, 0, sizeof(t->nodes));
-}
-
-static inline struct tree_node* tree_successor(struct tree_node* n) {
-    while (n->ln != NULL) { n = n->ln; }
-    return n;
-}
-
-static void tree_shift_nodes(struct tree* t, struct tree_node* u,
-                                             struct tree_node* v) {
+static inline void tree_shift_nodes(struct tree* t, struct tree_node* u,
+                                                    struct tree_node* v) {
     if (u->pn == NULL) {
         t->root = v;
     } else if (u == u->pn->ln) {
@@ -144,64 +166,104 @@ static inline void tree_insert(struct sqz* s, const uint8_t* p, size_t bytes) {
 
 static int tree_nodes_walked;
 
-static void tree_min_dist(const struct sqz* s,
-                          const struct tree_node* n, const uint8_t* p,
-                          size_t* best_size, size_t* best_dist) {
-    if (n != NULL) {
-        tree_nodes_walked++;
-        int cmp = memcmp(p, n->data, *best_size);
-        size_t dist = p - n->data;
-        if (dist > s->window) { tree_print(&s->tree, p); }
-        assert(dist <= s->window);
-        if (cmp == 0) {
-            if (dist < *best_dist) {
-                *best_dist = dist;
-                assert(memcmp(p, p - dist, *best_size) == 0);
-            }
-            tree_min_dist(s, n->ln, p, best_size, best_dist);
-            tree_min_dist(s, n->rn, p, best_size, best_dist);
-        } else if (cmp < 0) {
-            tree_min_dist(s, n->ln, p, best_size, best_dist);
-        } else { assert(cmp > 0);
-            tree_min_dist(s, n->rn, p, best_size, best_dist);
-        }
-    }
-}
-
-static void tree_walk(const struct sqz* s,
-                      const struct tree_node* n, const uint8_t* p,
-                      size_t bytes,
-                      size_t* best_size, size_t* best_dist) {
+static const struct tree_node* tree_max_size(const struct sqz* s,
+                          const struct tree_node* n,
+                          const struct tree_node* best,
+                          const uint8_t* p, size_t bytes,
+                          size_t* size, size_t* dist) {
+    const struct tree_node* r = best;
     if (n != NULL) {
         tree_nodes_walked++;
         assert(bytes > 0);
-        if (*best_size < sqz_max_size) {
-            int cmp = memcmp(p, n->data, *best_size + 1);
-//          printf("memcmp(\"%.8s\", \"%.8s\", %zd): %d\n", p, n->data, *best_size + 1, cmp);
+        if (*size < sqz_max_size) {
+            tree_nodes_walked++;
+            size_t len = *size;
+            int cmp = memcmp(p, n->data, len + 1);
+//          printf("memcmp(\"%.8s\", \"%.8s\", %zd): %d\n", p, n->data, *size + 1, cmp);
             if (cmp == 0) {
-                const size_t dist = p - n->data;
+                const size_t dst = p - n->data;
                 const size_t max_size = bytes < sqz_max_size ? bytes : sqz_max_size;
-                while (*best_size < max_size && cmp == 0) {
-                    (*best_size)++;
-                    cmp = (int32_t)p[*best_size] - (int32_t)n->data[*best_size];
+                while (len < max_size && cmp == 0) {
+                    len++;
+                    cmp = (int32_t)p[len] - (int32_t)n->data[len];
                 }
-                assert(memcmp(p, p - dist, *best_size) == 0);
-                *best_dist = dist;
-                assert(memcmp(p, p - *best_dist, *best_size) == 0);
-//              printf("best size: %zd dist: %zd\n", *best_size, *best_dist);
-                tree_walk(s, n->ln, p, bytes, best_size, best_dist);
-                tree_walk(s, n->rn, p, bytes, best_size, best_dist);
+                assert(memcmp(p, p - dst, len) == 0);
+                if (len > *size) {
+                    *size = len;
+                    *dist = dst;
+                    r = n;
+assert(*dist == (size_t)(p - r->data));
+                    assert(memcmp(p, p - *dist, *size) == 0);
+                } else if (len == *size && dst < *dist) {
+                    *dist = dst;
+                    r = n;
+assert(*dist == (size_t)(p - r->data));
+                    assert(memcmp(p, p - *dist, *size) == 0);
+                }
+//              printf("best size: %zd dst: %zd\n", *size, *dst);
+                r = tree_max_size(s, n->ln, r, p, bytes, size, dist);
+                r = tree_max_size(s, n->rn, r, p, bytes, size, dist);
             } else if (cmp < 0) {
-                tree_walk(s, n->ln, p, bytes, best_size, best_dist);
+                r = tree_max_size(s, n->ln, r, p, bytes, size, dist);
             } else if (cmp > 0) {
-                tree_walk(s, n->rn, p, bytes, best_size, best_dist);
+                r = tree_max_size(s, n->rn, r, p, bytes, size, dist);
             }
         }
     }
+    if (r != NULL) {
+assert(*dist == (size_t)(p - r->data) && *dist != 0);
+    } else {
+assert(*dist == 0);
+    }
+    return r;
+}
+
+static inline void tree_min_dist(const struct tree_node* n,
+                                 const uint8_t* p,
+                                 size_t* size, size_t* dist) {
+    assert(*size <= sqz_max_size);
+    assert(memcmp(p, p - *dist, *size) == 0);
+    // Initialize minimal distance to the distance found so far
+    size_t min_dist = *dist;
+    const struct tree_node* best_node = n; // TODO - don't need it at all
+    // Check nodes to the left (predecessors)
+    const struct tree_node* node = tree_prev(n);
+    while (node != NULL) {
+        tree_nodes_walked++;
+        if (memcmp(p, node->data, *size) == 0) {
+            size_t curr_dist = p - node->data;
+            if (curr_dist < min_dist) {
+                min_dist  = curr_dist;
+                best_node = node;
+            }
+        } else {
+            break;
+        }
+        node = tree_prev(node);
+    }
+    // Check nodes to the right (successors)
+    node = tree_next(n);
+    while (node != NULL) {
+        tree_nodes_walked++;
+        if (memcmp(p, node->data, *size) == 0) {
+            size_t curr_dist = p - node->data;
+            if (curr_dist < min_dist) {
+                min_dist  = curr_dist;
+                best_node = node;
+            }
+        } else {
+            break;
+        }
+        node = tree_next(node);
+    }
+    // Update *dist to the minimal distance found
+    assert((size_t)(p - best_node->data) == min_dist);
+    *dist = p - best_node->data;
+    assert(memcmp(p, p - *dist, *size) == 0);
 }
 
 // returns the size of the longest match and the distance to it
-// size: [sqz_min_size..sqz_max_size]  dist: [1..window]
+// size: [sqz_min_size..sqz_max_size]  dst: [1..window]
 
 static inline void tree_find(const struct sqz* s, const uint8_t* p,
                              size_t bytes, size_t* size, size_t* dist) {
@@ -209,23 +271,23 @@ static inline void tree_find(const struct sqz* s, const uint8_t* p,
     assert(*dist == 0);
     const struct tree* t = &s->tree;
     tree_nodes_walked = 0;
-    tree_walk(s, t->root, p, bytes, size, dist);
+    const struct tree_node* n = tree_max_size(s, t->root, NULL, p, bytes, size, dist);
     size_t walked = tree_nodes_walked;
     if (sqz_min_size <= *size) {
         assert(*size <= sqz_max_size);
         tree_nodes_walked = 0;
         assert(memcmp(p, p - *dist, *size) == 0);
-        tree_min_dist(s, t->root, p, size, dist);
+        tree_min_dist(n, p, size, dist);
         assert(memcmp(p, p - *dist, *size) == 0);
-//      printf("tree_walk(): %d tree_min_dist(): %d nodes\n",
-//              walked, tree_nodes_walked);
+        printf("tree_max_size(): %d tree_min_dist(): %d nodes\n",
+                walked, tree_nodes_walked);
     } else {
-//      printf("tree_walk(): %d\n", walked);
+        printf("tree_max_size(): %d\n", walked);
     }
 }
 
 // returns the size of the longest match and the distance to it
-// size: [sqz_min_size..sqz_max_size]  dist: [1..window]
+// size: [sqz_min_size..sqz_max_size]  dst: [1..window]
 
 static void lz77_find(const struct sqz* s, const uint8_t d[], size_t bytes, size_t i,
                       size_t* size, size_t* dist) {
@@ -264,8 +326,8 @@ static void bst(size_t window, const uint8_t* d, size_t bytes) {
         size_t best_dist = 0;
         size_t best_size = 0;
         tree_find(s, d + i, maximum, &best_size, &best_dist);
-//      printf("tree_find(\"%.16s\") size:%zd dist:%zd \"%.16s\"\n",
-//              d + i, best_size, best_dist, d + i - best_dist);
+//      printf("tree_find(\"%.16s\") size:%zd dst:%zd \"%.16s\"\n",
+//              d + i, size, dst, d + i - dst);
         // LZ77:
         size_t lz77_size = 0;
         size_t lz77_dist = 0;
@@ -308,11 +370,6 @@ static void bst(size_t window, const uint8_t* d, size_t bytes) {
 }
 
 static void test1(void) {
-    static const d[1024 * 1024]; // zeros
-    bst(sqz_max_win, d, sizeof(d));
-}
-
-static void test2(void) {
     const char* str[] = {
         "abcabcdabcdeabcdefabcdefgabcdefabcdeabcd "
         "abcabcdabcdeabcdefabcdefgabcdefabcdeabcd",
@@ -356,9 +413,17 @@ static void test2(void) {
     }
 }
 
+static void test2(void) {
+    static uint8_t d[128 * 1024];
+    memset(d, 0, sizeof(d));
+    // this will create very skew deep and will require
+    // balanced tree to work:
+    bst(sqz_max_win, d, sizeof(d));
+}
+
 int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
-//  test1();
-    test2();
+    test1();
+//  test2();
     return 0;
 }
