@@ -220,20 +220,20 @@ static inline void tree_free(struct tree* t, struct tree_node* n) {
     t->free_list = n;
 }
 
-static inline int tree_height(struct tree_node* n) {
+static inline int tree_node_height(struct tree_node* n) {
     return n != NULL ? n->height : 0;
 }
 
 static inline int tree_balance_factor(struct tree_node* n) {
     return n != NULL ?
-        tree_height(n->ln) - tree_height(n->rn) : 0;
+        tree_node_height(n->ln) - tree_node_height(n->rn) : 0;
 }
 
 static inline void tree_update_height(struct tree_node* n) {
     if (n != NULL) {
         n->height =
-            1 + (tree_height(n->ln) > tree_height(n->rn) ?
-                 tree_height(n->ln) : tree_height(n->rn));
+            1 + (tree_node_height(n->ln) > tree_node_height(n->rn) ?
+                 tree_node_height(n->ln) : tree_node_height(n->rn));
     }
 }
 

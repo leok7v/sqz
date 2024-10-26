@@ -217631,15 +217631,15 @@ static void sqlite3Fts5HashScanEntry(
 #define FTS5_DATA_HEIGHT_B  5     /* Max dlidx tree height of 32 */
 #define FTS5_DATA_PAGE_B   31     /* Max page number of 2147483648 */
 
-#define fts5_dri(segid, dlidx, tree_height, pgno) (                                 \
+#define fts5_dri(segid, dlidx, tree_node_height, pgno) (                                 \
  ((i64)(segid)  << (FTS5_DATA_PAGE_B+FTS5_DATA_HEIGHT_B+FTS5_DATA_DLI_B)) +    \
  ((i64)(dlidx)  << (FTS5_DATA_PAGE_B + FTS5_DATA_HEIGHT_B)) +                  \
- ((i64)(tree_height) << (FTS5_DATA_PAGE_B)) +                                       \
+ ((i64)(tree_node_height) << (FTS5_DATA_PAGE_B)) +                                       \
  ((i64)(pgno))                                                                 \
 )
 
 #define FTS5_SEGMENT_ROWID(segid, pgno)       fts5_dri(segid, 0, 0, pgno)
-#define FTS5_DLIDX_ROWID(segid, tree_height, pgno) fts5_dri(segid, 1, tree_height, pgno)
+#define FTS5_DLIDX_ROWID(segid, tree_node_height, pgno) fts5_dri(segid, 1, tree_node_height, pgno)
 
 #ifdef SQLITE_DEBUG
 static int sqlite3Fts5Corrupt() { return SQLITE_CORRUPT_VTAB; }
