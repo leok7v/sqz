@@ -195,12 +195,22 @@ static void tree_print(const struct tree* t, const uint8_t* p) {
 
 // n->height = 1 + max(tree_height(n->ln), tree_height(n->rn));
 
-static inline void tree_fix_height(struct tree_node* n) {
+static inline bool tree_fix_height(struct tree_node* n) {
     int lh = tree_node_height(n->ln);
     int rh = tree_node_height(n->rn);
-//  int was = (int)n->height;
-    n->height = 1 + (lh > rh ? lh : rh);
-//  printf("%p ln:%p rn:%p %d := %d\n", n, n->ln, n->rn, was, (int)n->height);
+    int was = (int)n->height;
+    int height = 1 + (lh > rh ? lh : rh);
+    // writing to memory is much more expensive than reading from cache
+    // and register operations:
+    if (was != height) { n->height = height; }
+    #ifdef TREE_AVL_TRACE_FIX_HEIGHT
+        if (was != height) {
+            printf("%p ln:%p rn:%p %d := %d\n", n, n->ln, n->rn, was, (int)n->height);
+        } else {
+            printf("%p ln:%p rn:%p %d NO UPDATE\n", n, n->ln, n->rn, was, (int)n->height);
+        }
+    #endif
+    return was != height;
 }
 
 /* rotate left/right to root (pp)
@@ -250,6 +260,7 @@ static void tree_rebalance(struct tree* t, struct tree_node* n) {
                               (n == pn->ln ? &pn->ln : &pn->rn);
         int lh = tree_node_height(n->ln);
         int rh = tree_node_height(n->rn);
+        int bf = tree_bf(n);
         if (lh > rh + 1) {  // Left heavy
             int llh = tree_node_height(n->ln->ln);
             int lrh = tree_node_height(n->ln->rn);
@@ -275,8 +286,11 @@ static void tree_rebalance(struct tree* t, struct tree_node* n) {
             }
             tree_check_node(t->root);
         } else {
-            tree_fix_height(n); // absorb
+            bool balanced = -1 <= bf && bf <= +1;
+            bool absorbed = tree_fix_height(n); // absorb
+            if (balanced && absorbed) { assert("strange"); }
         }
+//      if (-1 <= bf && bf <= +1) { break; }
         n = pn;
     }
     #ifdef DEBUG
@@ -322,7 +336,7 @@ static void tree_delete_node(struct tree* t,
         s->ln = n->ln;
         s->ln->pn = s;
     }
-//  printf("tree_rebalance(%p) deleted: %p.pn: %p\n", sr, n, n->pn);
+//  printf("deleted: %p.pn: %p tree_rebalance(%p)\n", n, n->pn, sr);
     tree_rebalance(t, sr);
 }
 
@@ -516,7 +530,7 @@ static void tree_test(struct tree* t, const uint8_t* d, const size_t bytes,
         if (size >= sqz_min_size) {
             const size_t next = i + size;
             while (i < next) {
-//              printf("\n[%d] insert('%s')", (int)i, d + i);
+//              printf("\n[%d] insert('%.16s')", (int)i, d + i);
                 tree_insert(t, d + i, n, window);
 //              tree_debug_dump();
                 i++;
@@ -526,7 +540,7 @@ static void tree_test(struct tree* t, const uint8_t* d, const size_t bytes,
                 #endif
             }
         } else {
-//          printf("\n[%d] insert('%s')\n", (int)i, d + i);
+//          printf("\n[%d] insert('%.16s')\n", (int)i, d + i);
             tree_insert(t, d + i, n, window);
 //          tree_debug_dump();
             i++;
@@ -598,11 +612,16 @@ static void test3(void) {
     // will only work with AVL or Red Black trees
     static struct tree tree;
     struct tree* t = &tree;
-    static uint8_t d[128 * 1024];
+    #ifdef DEBUG
+    static uint8_t d[16 * 1024];
     memset(d, 0, sizeof(d));
-    // this will create very skew deep and will require
-    // balanced tree to work:
+    // 27 seconds - walks all the trees in verify
+    tree_test(t, d, sizeof(d), 4 * 1024);
+    #else
+    static uint8_t d[512 * 1024]; // 14 seconds in release - soo DAMN slow
+    memset(d, 0, sizeof(d));
     tree_test(t, d, sizeof(d), sqz_max_win);
+    #endif
     // possible additional optimization:
     // Do not to add equal nodes to the tree.
     // When same value node found (e.g. all zeros to sqz_max_size)
@@ -617,6 +636,8 @@ int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
     test1();
     test2();
-    test3();
+    #ifndef DEBUG
+    test3(); // too damn slow
+    #endif
     return 0;
 }
