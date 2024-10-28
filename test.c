@@ -471,7 +471,7 @@ static void tree_walk(struct tree_node* n, const uint8_t* p,
                     (*best_size)++;
                     cmp = (int32_t)p[*best_size] - (int32_t)n->data[*best_size];
                 }
-                if (*best_dist == 0 || *best_dist > p - n->data) {
+                if (*best_dist == 0 || *best_dist > (size_t)(p - n->data)) {
                     *best_dist = p - n->data;
                 }
                 printf("best size: %zd dist: %zd\n", *best_size, *best_dist);

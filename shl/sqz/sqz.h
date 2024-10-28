@@ -250,7 +250,7 @@ static void map_best(struct sqz* s, const void* data, size_t bytes,
         for (uint8_t i = 2; i < b - 1; i++) {
             hash = map_hash64_byte(hash, d[i]);
             int32_t r = map_get_hashed(m, hash, data, i + 1);
-            if (r != -1 && d - m->entry[r].data >= max_distance) {
+            if (r != -1 && (size_t)(d - m->entry[r].data) >= max_distance) {
                 map_remove(m, r);
             } else if (r != -1) {
                 best = r;
