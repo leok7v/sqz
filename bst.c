@@ -11,7 +11,7 @@ struct tree_node {
     struct tree_node* ln;  // left   node
     struct tree_node* rn;  // right  node
     struct tree_node* pn;  // parent node
-    intptr_t      height;
+    intptr_t      height;  // int8_t would be enough but alignment...
 };
 
 struct tree {
@@ -20,7 +20,6 @@ struct tree {
     size_t pos;
 };
 
-
 static void tree_init(struct tree* t) {
     memset(t, 0, sizeof(*t));
 }
@@ -28,11 +27,17 @@ static void tree_init(struct tree* t) {
 static void tree_print(const struct tree* t, const uint8_t* p);
 
 #ifdef DEBUG
-static const struct tree* current_tree;
-static const uint8_t*     current_pointer;
-#define tree_debug_dump() tree_print(current_tree, current_pointer)
+static const struct tree* debug_tree;
+static const uint8_t*     debug_p;
+static const uint8_t*     debug_data;
+static       size_t       debug_bytes;
+static       int          debug_max_depth;
+
+#define tree_debug_dump() tree_print(debug_tree, debug_p)
+#define tree_assert(b, ...) do { if (!(b)) { tree_debug_dump(); assert(b, __VA_ARGS__); } } while (0)
 #else
 #define tree_debug_dump()
+#define tree_assert(...) assert(__VA_ARGS__)
 #endif
 
 static size_t tree_node_count(const struct tree_node* n) {
@@ -40,49 +45,92 @@ static size_t tree_node_count(const struct tree_node* n) {
         1 + tree_node_count(n->ln) + tree_node_count(n->rn);
 }
 
-static inline intptr_t tree_node_height(struct tree_node* n) {
-    return n ? n->height : 0;
+static inline int tree_node_height(struct tree_node* n) {
+    return n ? (int)n->height : 0;
 }
 
-static inline intptr_t tree_bf(struct tree_node *n) { // balance factor
-    return !n ? 0 : tree_node_height(n->rn) - tree_node_height(n->ln);
+static inline int tree_bf(const struct tree_node *n) { // balance factor
+    return (int)(!n ? 0 : tree_node_height(n->rn) - tree_node_height(n->ln));
 }
 
-static inline intptr_t tree_depth(struct tree_node* n) {
-    intptr_t depth = 0;
+static inline int tree_depth(struct tree_node* n) {
+    int depth = 0;
     if (n) {
-        intptr_t ld = tree_depth(n->ln);
-        intptr_t rd = tree_depth(n->rn);
+        int ld = tree_depth(n->ln);
+        int rd = tree_depth(n->rn);
         depth = 1 + (ld > rd ? ld : rd);
     }
     return depth;
 }
 
+static void tree_check_node(struct tree_node* n) {
+     // structural consistency paranoia
+    if (n) {
+        if (n->ln) { tree_assert(n->ln->pn == n, "n: %p n->ln: %p n->ln->pn: %p", n, n->ln, n->ln->pn); }
+        if (n->rn) { tree_assert(n->rn->pn == n, "n: %p n->rn: %p n->rn->pn: %p", n, n->rn, n->rn->pn); }
+        tree_assert(n->pn != n, "n: %p n->pn: %p", n, n->pn);
+        tree_assert(n->ln != n, "n: %p n->ln: %p", n, n->ln);
+        tree_assert(n->rn != n, "n: %p n->rn: %p", n, n->rn);
+        tree_assert(!n->pn || n->pn != n->ln, "n: %p n->pn: %p n->ln: %p", n, n->pn, n->ln);
+        tree_assert(!n->pn || n->pn != n->rn, "n: %p n->pn: %p n->ln: %p", n, n->pn, n->ln);
+        tree_check_node(n->ln);
+        tree_check_node(n->rn);
+    }
+}
+
+static inline void tree_verify_height(struct tree_node* n) {
+    if (n) {
+        int lh = tree_node_height(n->ln);
+        int rh = tree_node_height(n->rn);
+        int height = 1 + (lh > rh ? lh : rh); (void)height;
+        tree_assert(n->height == height, "%p .height: %d expected: %d '%s'",
+                    n, n->height, height, n->data);
+    }
+}
+
+static void tree_verify_tree_heights(struct tree_node* n) {
+    if (n) {
+        tree_verify_height(n);
+        tree_verify_tree_heights(n->ln);
+        tree_verify_tree_heights(n->rn);
+    }
+}
+
 static void tree_verify_node(struct tree_node* pn, struct tree_node* n) {
     if (n) {
-        if (n->pn != pn) { tree_debug_dump(); }
-        assert(n->pn == pn, "n: %p n->pn: %p pn: %p", n, n->pn, pn);
-        intptr_t bf = tree_bf(n);
-        assert(-1 <= bf && bf <= +1);
+        tree_check_node(n);
+        tree_check_node(pn);
+        tree_assert(n->pn == pn, "n: %p n->pn: %p pn: %p", n, n->pn, pn);
+        int bf = tree_bf(n);
+        if (!(-1 <= bf && bf <= +1)) { tree_debug_dump(); }
+        tree_assert(-1 <= bf && bf <= +1, "%p balance factor: %d '%s'", n, bf, n->data);
+        tree_assert(debug_data <= debug_p && debug_p < debug_data + debug_bytes);
+        tree_assert(debug_data <= n->data && n->data < debug_data + debug_bytes);
+        tree_assert(!pn || debug_data <= pn->data && pn->data < debug_data + debug_bytes);
         tree_verify_node(n, n->ln);
         tree_verify_node(n, n->rn);
     }
 }
 
 static void tree_verify(struct tree* t) {
-    tree_verify_node((void*)0, t->root);
-    static intptr_t max_depth;
-    intptr_t depth = tree_depth(t->root);
-    if (depth > max_depth) {
-        max_depth = depth;
-        printf("max_depth: %d\n", (int)max_depth);
-    }
+    #ifdef DEBUG
+        tree_verify_node((void*)0, t->root);
+        int depth = tree_depth(t->root);
+        if (depth > debug_max_depth) {
+            debug_max_depth = depth;
+            printf("max_depth: %d root height: %d\n", (int)depth, (int)t->root->height);
+        }
+        tree_verify_tree_heights(t->root);
+    #else
+        (void)t;
+    #endif
 }
 
 static inline struct tree_node* tree_successor(struct tree_node* n) {
     while (n->ln) { n = n->ln; }
     return n;
 }
+
 static inline const struct tree_node* tree_prev(const struct tree_node* n) {
     // in-order predecessor
     if (n->ln) {
@@ -108,27 +156,23 @@ static inline const struct tree_node* tree_next(const struct tree_node* n) {
 }
 
 static void tree_print_node(char kind, const struct tree_node* n,
-        const struct tree_node* parent, size_t indent, const uint8_t* p) {
+                            size_t indent, const uint8_t* p) {
     if (n) {
         for (size_t i = 0; i < indent; i++) printf(" ");
         assert(p >= n->data); // we can use size_t instead of ptrdiff_t
         const size_t distance = p - n->data; // from current position 'p'
-        if (!parent) {
-            printf("%c [%zu]'%s' %p\n", kind, distance, n->data, n->data);
-        } else {
-            const size_t pd = p - parent->data; // parent distance
-            printf("%c p:%zu [%zu]'%s' %p\n", kind, pd, distance, n->data, n->data);
-        }
-        tree_print_node('L', n->ln, n, indent + 1, p);
-        tree_print_node('R', n->rn, n, indent + 1, p);
+        printf("%c %p %d [%zu]'%s' \n", kind, n, (int)n->height, distance, n->data);
+        tree_print_node('L', n->ln, indent + 1, p);
+        tree_print_node('R', n->rn, indent + 1, p);
     }
 }
 
 static void tree_dump_node(const struct tree_node* n, const uint8_t* p) {
     if (n) {
         tree_dump_node(n->ln, p);
-        printf("[%2zu] %p [pn:%p ln:%p rn:%p] %d %p '%s'\n", p - n->data,
-                n, n->pn, n->ln, n->rn, n->height, n->data, n->data);
+        int bf = tree_bf(n);
+        printf("[%2zu] %p [pn:%p ln:%p rn:%p] %d:%+2d %p '%s'\n", p - n->data,
+                n, n->pn, n->ln, n->rn, (int)n->height, bf, n->data, n->data);
         tree_dump_node(n->rn, p);
     }
 }
@@ -140,137 +184,104 @@ static void tree_dump(const struct tree* t, const uint8_t* p) {
 
 static void tree_print(const struct tree* t, const uint8_t* p) {
     printf("\n");
+#ifdef DEBUG
+    printf("i: %zu\n", debug_p - debug_data);
+#endif
     tree_dump(t, p);
     printf("\n");
-    tree_print_node(' ', t->root, (void*)0, 0, p);
+    tree_print_node(' ', t->root, 0, p);
     printf("\n");
 }
 
+// n->height = 1 + max(tree_height(n->ln), tree_height(n->rn));
+
 static inline void tree_fix_height(struct tree_node* n) {
-    intptr_t lh = tree_node_height(n->ln);
-    intptr_t rh = tree_node_height(n->rn);
+    int lh = tree_node_height(n->ln);
+    int rh = tree_node_height(n->rn);
+//  int was = (int)n->height;
     n->height = 1 + (lh > rh ? lh : rh);
+//  printf("%p ln:%p rn:%p %d := %d\n", n, n->ln, n->rn, was, (int)n->height);
 }
 
-static void check_node(struct tree_node* n) {
-     // paranoia
-    if (n) {
-        if (n->ln) { assert(n->ln->pn == n); }
-        if (n->rn) { assert(n->rn->pn == n); }
-        assert(n->pn != n);
-        assert(n->ln != n);
-        assert(n->rn != n);
-        assert(!n->pn || n->pn != n->ln);
-        assert(!n->pn || n->pn != n->rn);
-    }
-}
+/* rotate left/right to root (pp)
+ *
+ * *pp:y        *pp:x
+ *    / \   <==>   / \
+ *   x   C        A   y
+ *  / \              / \
+ * A   B            B   C
+ *
+ */
 
-static struct tree_node* rotate_left(struct tree_node* x) {
-    struct tree_node* rn = x->rn;
-    x->rn = rn->ln;
-    if (rn->ln) { rn->ln->pn = x; }
-    rn->ln = x;
-//  printf("Before rotate_left:  %p x->height = %d,  %p rn->height = %d\n", x, (int)x->height, rn, (int)rn->height);
-    tree_fix_height(x);
+static struct tree_node* tree_rotate_left(struct tree_node** pp) {
+    struct tree_node* nd = *pp;    // old root
+    struct tree_node* rn = nd->rn; // (*pp)->right (new root)
+    struct tree_node* ln = rn->ln; // (*pp)->right->left
+    nd->rn = ln;
+    if (ln) { ln->pn = nd; tree_assert(rn->pn != rn->ln && rn->pn != rn->rn); }
+    rn->ln = nd; nd->pn = rn;
+tree_assert(nd->pn != nd->ln);
+tree_assert(nd->pn != nd->rn);
+    *pp = rn;
+    tree_fix_height(rn->ln);
     tree_fix_height(rn);
-//  printf("After  rotate_left:  %p x->height = %d,  %p rn->height = %d\n", x, (int)x->height, rn, (int)rn->height);
     return rn;
 }
 
-static struct tree_node* rotate_right(struct tree_node* x) {
-    struct tree_node *ln = x->ln;
-    x->ln = ln->rn;
-    if (ln->rn) { ln->rn->pn = x; }
-    ln->rn = x;
-//  printf("Before rotate_right: %p x->height = %d,  %p rn->height = %d\n", x, (int)x->height, ln, (int)ln->height);
-    tree_fix_height(x);
+static struct tree_node* tree_rotate_right(struct tree_node** pp) {
+    struct tree_node* nd = *pp;     // old root
+    struct tree_node* ln = nd->ln;  // (*pp)->left (new root)
+    struct tree_node* rn = ln->rn;  // (*pp)->left->right
+    nd->ln = rn;
+    if (rn) { rn->pn = nd; tree_assert(rn->pn != rn->ln && rn->pn != rn->rn); }
+    ln->rn = nd; nd->pn = ln;
+tree_assert(nd->pn != nd->ln);
+tree_assert(nd->pn != nd->rn);
+    *pp = ln;
+    tree_fix_height(ln->rn);
     tree_fix_height(ln);
-//  printf("After  rotate_right: %p x->height = %d,  %p rn->height = %d\n", x, (int)x->height, ln, (int)ln->height);
     return ln;
 }
 
-static struct tree_node* rotate_left_right(struct tree_node* x) {
-    x->ln = rotate_left(x->ln);
-    if (x->ln) { x->ln->pn = x; }
-    tree_fix_height(x);
-    check_node(x);
-    struct tree_node* n = rotate_right(x);
-    tree_fix_height(n);
-    return n;
-}
-
-static struct tree_node* rotate_right_left(struct tree_node* x) {
-    x->rn = rotate_right(x->rn);
-    if (x->rn) { x->rn->pn = x; }
-    tree_fix_height(x);
-    check_node(x);
-    struct tree_node* n = rotate_left(x);
-    tree_fix_height(n);
-    return n;
-}
-
-static void tree_rebalance(struct tree *t, struct tree_node *z) {
-    struct tree_node* n = NULL; // New root of the rotated subtree
-    while (z) {
-        struct tree_node* x = z->pn;
-        if (!x) break;
-        intptr_t bf = tree_bf(x);
-        struct tree_node* g = null;
-        if (z == x->rn) {
-            if (bf > 1) {
-                g = x->pn;
-                if (tree_bf(z) < 0) {
-                    assert(x->rn && x->rn->ln);
-                    n = rotate_right_left(x);
-                } else {
-                    n = rotate_left(x);
-                    if (n->ln) { n->ln->pn = n; }
-                }
+static void tree_rebalance(struct tree* t, struct tree_node* n) {
+    while (n) {
+        struct tree_node*  pn = n->pn;  // parent node
+        struct tree_node** pp = !pn ? &t->root : // parent reference
+                              (n == pn->ln ? &pn->ln : &pn->rn);
+        int lh = tree_node_height(n->ln);
+        int rh = tree_node_height(n->rn);
+        if (lh > rh + 1) {  // Left heavy
+            int llh = tree_node_height(n->ln->ln);
+            int lrh = tree_node_height(n->ln->rn);
+            if (llh >= lrh) {
+                // Single Right Rotation
+                tree_rotate_right(pp)->pn = pn;
             } else {
-                if (tree_bf(x) < 0) { break; }
-                tree_fix_height(x); // TODO: do we need this?
-                z = x;
-                continue;
+                // Double Rotation: Left-Right
+                tree_rotate_left(&n->ln)->pn = n;
+                tree_rotate_right(pp)->pn = pn;
             }
+            tree_check_node(t->root);
+        } else if (rh > lh + 1) {  // Right heavy
+            int rlh = tree_node_height(n->rn->ln);
+            int rrh = tree_node_height(n->rn->rn);
+            if (rrh >= rlh) {
+                // Single Left Rotation
+                tree_rotate_left(pp)->pn = pn;
+            } else {
+                // Double Rotation: Right-Left
+                tree_rotate_right(&n->rn)->pn = n;
+                tree_rotate_left(pp)->pn = pn;
+            }
+            tree_check_node(t->root);
         } else {
-            if (bf < -1) {
-                g = x->pn;
-                if (tree_bf(z) > 0) {
-                    assert(x->ln && x->ln->rn);
-                    n = rotate_left_right(x);
-                } else {
-                    n = rotate_right(x);
-                    if (n->rn) { n->rn->pn = n; }
-                }
-            } else {
-                if (tree_bf(x) < 0) { break; }
-                tree_fix_height(x); // TODO: do we need this?
-                z = x;
-                continue;
-            }
+            tree_fix_height(n); // absorb
         }
-        n->pn = g;
-        if (n->ln) { n->ln->pn = n; }
-        if (n->rn) { n->rn->pn = n; }
-        if (g != null) {
-            if (x == g->ln) {
-                g->ln = n;
-            } else {
-                g->rn = n;
-            }
-            n->pn = g;
-            check_node(g);
-            check_node(n);
-        } else {
-            check_node(n);
-            t->root = n;
-            n->pn = NULL;
-//          tree_debug_dump();
-            check_node(t->root);
-        }
-        break;
+        n = pn;
     }
-    if (n) { tree_fix_height(n); }
+    #ifdef DEBUG
+        tree_verify(t);
+    #endif
 }
 
 static inline void tree_shift_nodes(struct tree* t, struct tree_node* u,
@@ -282,62 +293,45 @@ static inline void tree_shift_nodes(struct tree* t, struct tree_node* u,
     } else {
         u->pn->rn = v;
     }
-    if (v) {
-        v->pn = u->pn;
-    }
+    if (v) { v->pn = u->pn; }
+    tree_check_node(u->pn);
+    tree_check_node(v);
 }
 
-static void tree_delete_node_and_rebalance(struct tree* t, struct tree_node* n) {
-    // TODO: possibly no needed at all
+static void tree_delete_node(struct tree* t,
+                             struct tree_node* n) {
     struct tree_node* s;
+    struct tree_node* sr = n->pn; // node to start rebalance at
     if (!n->ln) {
         s = n->rn;
-        tree_shift_nodes(t, n, n->rn);
+        tree_shift_nodes(t, n, s);
     } else if (!n->rn) {
         s = n->ln;
-        tree_shift_nodes(t, n, n->ln);
+        tree_shift_nodes(t, n, s);
     } else {
         s = tree_successor(n->rn);
-        if (s->pn != n) {
+        if (s->pn != n) { // successor is not a direct child
+            sr = s->pn;   // rebalance will start deeper in the tree
             tree_shift_nodes(t, s, s->rn);
             s->rn = n->rn;
             s->rn->pn = s;
+        } else {
+            sr = s;       // rebalance will start deeper in the tree
         }
         tree_shift_nodes(t, n, s);
         s->ln = n->ln;
         s->ln->pn = s;
     }
-//  tree_verify(t);
-    tree_rebalance(t, s);
-}
-
-
-static void tree_delete_node(struct tree* t, struct tree_node* n) {
-    if (!n->ln) {
-        tree_shift_nodes(t, n, n->rn);
-    } else if (!n->rn) {
-        tree_shift_nodes(t, n, n->ln);
-    } else {
-        struct tree_node* s = tree_successor(n->rn);
-        if (s->pn != n) {
-            tree_shift_nodes(t, s, s->rn);
-            s->rn = n->rn;
-            s->rn->pn = s;
-        }
-        tree_shift_nodes(t, n, s);
-        s->ln = n->ln;
-        s->ln->pn = s;
-    }
-//  tree_verify(t);
+//  printf("tree_rebalance(%p) deleted: %p.pn: %p\n", sr, n, n->pn);
+    tree_rebalance(t, sr);
 }
 
 static struct tree_node* tree_evict(struct tree* t, size_t window) {
     struct tree_node* n = t->nodes + t->pos;
     t->pos = (t->pos + 1) % window;
     if (n->data) {
-//      printf("\ndelete(%p %p '%.16s')\n", n, n->data, n->data);
+//      printf("%p delete('%.16s') %p\n", n, n->data, n->data);
         tree_delete_node(t, n);
-//      tree_debug_dump();
     }
     memset(n, 0, sizeof(*n));
     return n;
@@ -349,6 +343,7 @@ static inline void tree_insert(struct tree* t,
     struct tree_node* f = tree_evict(t, window); // free node
     f->data = p;
     f->height = 1;
+    assert(!f->pn && !f->ln && !f->rn);
     struct tree_node* n = t->root;
     struct tree_node* w = (void*)0; // value of 'n' was 'w'
     while (n) {
@@ -357,15 +352,17 @@ static inline void tree_insert(struct tree* t,
         if (cmp < 0) { n = n->ln; } else { n = n->rn; }
     }
     if (!w) {
+        tree_check_node(f);
         t->root = f;
+        tree_check_node(t->root);
+        tree_assert(t->root && !t->root->pn);
     } else {
         int cmp = memcmp(p, w->data, bytes);
         if (cmp < 0) { w->ln = f; } else { w->rn = f; }
         f->pn = w;
-//tree_verify(t);
+        tree_check_node(f); // structural
+//      printf("%p inserted('%s')\n", f, f->data);
         tree_rebalance(t, f);
-// tree_debug_dump();
-//tree_verify(t);
     }
 }
 
@@ -470,17 +467,19 @@ static void lz77_find(const uint8_t d[], const size_t bytes, const size_t i,
     *dist = dst;
 }
 
-static void verify(const struct tree* t, const size_t i,
-                   const uint8_t* d, const size_t bytes, const size_t window,
-                   size_t tree_size, size_t tree_dist) {
+static void test_compare(const struct tree* t, const size_t i,
+        const uint8_t* d, const size_t bytes, const size_t window,
+        size_t tree_size, size_t tree_dist) {
     size_t lz77_size = 0;
     size_t lz77_dist = 0;
     lz77_find(d, bytes, i, &lz77_size, &lz77_dist, window);
     const uint8_t* match0 = d + i - tree_dist;
     const uint8_t* match1 = d + i - lz77_dist;
     if (tree_dist != lz77_dist || tree_size != lz77_size) {
-        printf("[%zu] '%.*s' %3zu:%zu tree\n", i, (int)tree_size, match0, tree_dist, tree_size);
-        printf("[%zu] '%.*s' %3zu:%zu lz77\n", i, (int)lz77_size, match1, lz77_dist, lz77_size);
+        printf("[%zu] '%.*s' %3zu:%zu tree\n",
+               i, (int)tree_size, match0, tree_dist, tree_size);
+        printf("[%zu] '%.*s' %3zu:%zu lz77\n",
+               i, (int)lz77_size, match1, lz77_dist, lz77_size);
         printf("tree_node_count(): %d\n", tree_node_count(t->root));
         tree_print(t, d + i);
     }
@@ -495,21 +494,25 @@ static void verify(const struct tree* t, const size_t i,
     swear(tree_dist == lz77_dist && tree_size == lz77_size);
 }
 
-static void tree_lz77(struct tree* t, const uint8_t* d, const size_t bytes,
-                const size_t window) { // compare bst/lva search to lz77
+static void tree_test(struct tree* t, const uint8_t* d, const size_t bytes,
+                      const size_t window) {
     printf("window: %zd\n", window);
     tree_init(t);
     size_t i = 0;
     #ifdef DEBUG
-        current_tree = t;
-        current_pointer = d;
+        debug_data  = d;
+        debug_bytes = bytes;
+        debug_tree  = t;
+        debug_p     = d;
+        debug_max_depth = 0;
     #endif
     while (i < bytes) {
         size_t n = bytes - i < sqz_max_size ? bytes - i : sqz_max_size;
         size_t dist = 0;
         size_t size = 0;
         tree_find(t, d + i, n, &size, &dist);
-        verify(t, i, d, n, window, size, dist); // compare with lz77 search
+        // compare size, dist with results of lz77 search
+        test_compare(t, i, d, n, window, size, dist);
         if (size >= sqz_min_size) {
             const size_t next = i + size;
             while (i < next) {
@@ -519,16 +522,16 @@ static void tree_lz77(struct tree* t, const uint8_t* d, const size_t bytes,
                 i++;
                 n = bytes - i < sqz_max_size ? bytes - i : sqz_max_size;
                 #ifdef DEBUG
-                    current_pointer = d + i;
+                    debug_p = d + i;
                 #endif
             }
         } else {
-//          printf("\n[%d] insert('%s')", (int)i, d + i);
+//          printf("\n[%d] insert('%s')\n", (int)i, d + i);
             tree_insert(t, d + i, n, window);
 //          tree_debug_dump();
             i++;
             #ifdef DEBUG
-                current_pointer = d + i;
+                debug_p = d + i;
             #endif
         }
     }
@@ -537,6 +540,8 @@ static void tree_lz77(struct tree* t, const uint8_t* d, const size_t bytes,
 
 static void test1(void) {
     const char* str[] = {
+        "abcabcdabcdeabcdefabcdefgabcdefabcdeabcd",
+
         "abcabcdabcdeabcdefabcdefgabcdefabcdeabcd "
         "abcabcdabcdeabcdefabcdefgabcdefabcdeabcd",
 
@@ -575,7 +580,7 @@ static void test1(void) {
         }
         printf("\n");
         for (size_t window = 8; window <= sqz_max_win; window <<= 1) {
-            tree_lz77(t, d, bytes, window);
+            tree_test(t, d, bytes, window);
         }
     }
 }
@@ -585,7 +590,8 @@ static void test2(void) {
     struct tree* t = &tree;
     static uint8_t d[1024];
     memset(d, 0, sizeof(d));
-    tree_lz77(t, d, sizeof(d), 16);
+    tree_test(t, d, sizeof(d), 16);
+    tree_debug_dump();
 }
 
 static void test3(void) {
@@ -596,7 +602,7 @@ static void test3(void) {
     memset(d, 0, sizeof(d));
     // this will create very skew deep and will require
     // balanced tree to work:
-    tree_lz77(t, d, sizeof(d), sqz_max_win);
+    tree_test(t, d, sizeof(d), sqz_max_win);
     // possible additional optimization:
     // Do not to add equal nodes to the tree.
     // When same value node found (e.g. all zeros to sqz_max_size)
