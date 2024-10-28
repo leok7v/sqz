@@ -87,7 +87,7 @@ static inline void tree_verify_height(struct tree_node* n) {
         int lh = tree_node_height(n->ln);
         int rh = tree_node_height(n->rn);
         int height = 1 + (lh > rh ? lh : rh); (void)height;
-        tree_assert(n->height == height, "%p .height: %d expected: %d '%s'",
+        tree_assert(n->height == height, "%p .height: %d expected: %d '%.16s'",
                     n, n->height, height, n->data);
     }
 }
@@ -106,7 +106,7 @@ static void tree_verify_node(struct tree_node* pn, struct tree_node* n) {
         tree_assert(n->pn == pn, "n: %p n->pn: %p pn: %p", n, n->pn, pn);
         int bf = tree_bf(n);
         if (!(-1 <= bf && bf <= +1)) { tree_debug_dump(); }
-        tree_assert(-1 <= bf && bf <= +1, "%p balance factor: %d '%s'", n, bf, n->data);
+        tree_assert(-1 <= bf && bf <= +1, "%p balance factor: %d '%.16s'", n, bf, n->data);
         tree_assert(debug_data <= debug_p && debug_p < debug_data + debug_bytes);
         tree_assert(debug_data <= n->data && n->data < debug_data + debug_bytes);
         tree_assert(!pn || debug_data <= pn->data && pn->data < debug_data + debug_bytes);
@@ -168,7 +168,7 @@ static void tree_print_node(char kind, const struct tree_node* n,
         for (size_t i = 0; i < indent; i++) printf(" ");
         assert(p >= n->data); // we can use size_t instead of ptrdiff_t
         const size_t distance = p - n->data; // from current position 'p'
-        printf("%c %p %d [%zu]'%s' \n", kind, n, (int)n->height, distance, n->data);
+        printf("%c %p %d [%zu]'%.16s' \n", kind, n, (int)n->height, distance, n->data);
         tree_print_node('L', n->ln, indent + 1, p);
         tree_print_node('R', n->rn, indent + 1, p);
     }
@@ -178,7 +178,7 @@ static void tree_dump_node(const struct tree_node* n, const uint8_t* p) {
     if (n) {
         tree_dump_node(n->ln, p);
         int bf = tree_bf(n);
-        printf("[%2zu] %p [pn:%p ln:%p rn:%p] %d:%+2d %p '%s'\n", p - n->data,
+        printf("[%2zu] %p [pn:%p ln:%p rn:%p] %d:%+2d %p '%.16s'\n", p - n->data,
                 n, n->pn, n->ln, n->rn, (int)n->height, bf, n->data, n->data);
         tree_dump_node(n->rn, p);
     }
@@ -355,20 +355,41 @@ static inline void tree_insert(struct tree* t,
     assert(!f->pn && !f->ln && !f->rn);
     struct tree_node* n = t->root;
     struct tree_node* w = (void*)0; // value of 'n' was 'w'
+    int cmp = 0;
     while (n) {
         w = n;
         assert(bytes <= sqz_max_size);
-        int cmp = memcmp(p, n->data, bytes);
+        cmp = memcmp(p, n->data, bytes);
         if (cmp < 0) { n = n->ln; } else { n = n->rn; }
     }
     if (!w) {
         t->root = f;
     } else {
-        int cmp = memcmp(p, w->data, bytes);
-        if (cmp < 0) { w->ln = f; } else { w->rn = f; }
-        f->pn = w;
-//      printf("%p inserted('%s')\n", f, f->data);
-        tree_rebalance(t, f);
+        // when compressing wast amount of zeros it matters
+        assert(cmp == memcmp(p, w->data, bytes));
+        if (cmp == 0 && bytes == sqz_max_size) { // special case
+            // Duplicate node, new one has shorter distance.
+            assert(w->data < f->data);
+            if (!w->pn) {
+                t->root = f;
+            } else {
+                if (w->pn->ln == w) { w->pn->ln = f; } else { w->pn->rn = f; }
+            }
+            // new node occupies the same position in a tree but
+            *f = *w;     // copy everything
+            f->data = p; // except window data pointer
+            if (f->ln) { f->ln->pn = f; }
+            if (f->rn) { f->rn->pn = f; }
+            // old node will be evicted earlier than new node without
+            // removing it from the tree:
+            memset(w, 0, sizeof(*w));
+//          printf("%p replaced(%p:'%.16s')\n", f, f->data, f->data);
+        } else {
+            if (cmp < 0) { w->ln = f; } else { w->rn = f; }
+            f->pn = w;
+//          printf("%p inserted(%p:'%.16s')\n", f, f->data, f->data);
+            tree_rebalance(t, f);
+        }
     }
 }
 
@@ -504,6 +525,8 @@ static void test_compare(const struct tree* t, const size_t i,
 static void tree_test(struct tree* t, const uint8_t* d, const size_t bytes,
                       const size_t window) {
     printf("window: %zd\n", window);
+    swear(2 <= window && window <= sqz_max_win);
+    swear(((window - 1) & window) == 0); // power of two
     tree_init(t);
     size_t i = 0;
     #ifdef DEBUG
@@ -545,6 +568,9 @@ static void tree_test(struct tree* t, const uint8_t* d, const size_t bytes,
     printf("\n");
 }
 
+static struct tree tree;
+struct tree* t = &tree;
+
 static void test1(void) {
     const char* str[] = {
         "abcabcdabcdeabcdefabcdefgabcdefabcdeabcd",
@@ -572,8 +598,6 @@ static void test1(void) {
         "The First Book of the Chronicles "
         "The Second Book of the Chronicles "
     };
-    static struct tree tree;
-    struct tree* t = &tree;
     for (size_t k = 0; k < sizeof(str) / sizeof(str[0]); k++) {
         const size_t bytes = strlen(str[k]);
         const uint8_t* d = (const uint8_t*)str[k];
@@ -593,44 +617,75 @@ static void test1(void) {
 }
 
 static void test2(void) {
-    static struct tree tree;
-    struct tree* t = &tree;
     static uint8_t d[1024];
     memset(d, 0, sizeof(d));
     tree_test(t, d, sizeof(d), 16);
-    tree_debug_dump();
 }
 
 static void test3(void) {
-    // will only work with AVL or Red Black trees
-    static struct tree tree;
-    struct tree* t = &tree;
+    enum { n = sqz_max_size + 2 };
+    static_assert(n == 256);
+    static uint8_t d[128 * n];
+    uint8_t bits = 'A';
+    uint8_t* e = d + sizeof(d);
+    for (uint8_t* p = d; p + n - 1 < e; p += n) {
+        memset(p, bits, n);
+        bits = bits == 'A' ? 'B' : 'A';
+    }
+    printf("0x%02X\n", e[-1]);
+    assert(e[-1] == 'B');
+    for (size_t window = 8; window <= 1024; window <<= 1) {
+        tree_test(t, d, sizeof(d), window);
+    }
+}
+
+static uint64_t seed = 1; // random seed start value (must be odd)
+
+static uint64_t random64(uint64_t* state) {
+    // Linear Congruential Generator with inline mixing
+    thread_local static bool initialized;
+    if (!initialized) { initialized = true; *state |= 1; };
+    *state = (*state * 0xD1342543DE82EF95uLL) + 1;
+    uint64_t z = *state;
+    z = (z ^ (z >> 32)) * 0xDABA0B6EB09322E3uLL;
+    z = (z ^ (z >> 32)) * 0xDABA0B6EB09322E3uLL;
+    return z ^ (z >> 32);
+}
+
+static double rand64(uint64_t *state) { // [0.0..1.0) exclusive to 1.0
+    return (double)random64(state) / ((double)UINT64_MAX + 1.0);
+}
+
+static void test4(void) {
     #ifdef DEBUG
-    static uint8_t d[16 * 1024];
-    memset(d, 0, sizeof(d));
-    // 4 seconds: walks all the trees in verify
-    tree_test(t, d, sizeof(d), 4 * 1024);
+    enum { bytes = 1 * 1024 * 1024, window = 2u << 12 };
     #else
-    static uint8_t d[512 * 1024]; // 14 seconds in release - soo DAMN slow
-    memset(d, 0, sizeof(d));
-    tree_test(t, d, sizeof(d), sqz_max_win);
+    enum { bytes = 8 * 1024 * 1024, window = sqz_max_win };
     #endif
-    // possible additional optimization:
-    // Do not to add equal nodes to the tree.
-    // When same value node found (e.g. all zeros to sqz_max_size)
-    // replace it in the tree by new node (will have smaller distance).
-    // The large distance node .ln/.rn/.pn set to NULL and it will be
-    // skipped on node deletion when window shifts.
-    // It makes the tree more shallow and speed up searches in
-    // special case of big (> sqz_max_size) same value filled arrays.
+    static uint8_t d[bytes];
+    memset(d, 0, bytes);
+    tree_test(t, d, bytes, window); // release: ~8MiB/s
+}
+
+static void test5(void) {
+    #ifdef DEBUG
+    enum { bytes =  16 * 1024, window = 2u << 10 };
+    #else
+    enum { bytes = 128 * 1024, window = sqz_max_win };
+    #endif
+    static uint8_t d[bytes];
+    for (size_t i = 0; i < bytes; i++) {
+        d[i] = (uint8_t)(rand64(&seed) * 256);
+    }
+    tree_test(t, d, bytes, window); // release: ~ 32 KiB/s (super slow!!!)
 }
 
 int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
     test1();
     test2();
-    #ifndef DEBUG
-    test3(); // too damn slow
-    #endif
+    test3();
+    test4();
+    test5();
     return 0;
 }
