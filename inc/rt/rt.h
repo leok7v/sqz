@@ -148,7 +148,7 @@ static void rt_flush_buffer(rt_debug_output_t* out, const char* file,
         char* end = strchr(start, '\n');
         while (end != null) {
             *end = '\0';
-            char output[8 * 1024];
+            char output[2 * 1024];
             out->max_prefix_len = rt_max(out->max_prefix_len,
                                         (int32_t)strlen(prefix));
             out->max_function_len = rt_max(out->max_function_len,
