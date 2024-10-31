@@ -641,21 +641,6 @@ static void test3(void) {
 
 static uint64_t seed = 1; // random seed start value (must be odd)
 
-static uint64_t random64(uint64_t* state) {
-    // Linear Congruential Generator with inline mixing
-    thread_local static bool initialized;
-    if (!initialized) { initialized = true; *state |= 1; };
-    *state = (*state * 0xD1342543DE82EF95uLL) + 1;
-    uint64_t z = *state;
-    z = (z ^ (z >> 32)) * 0xDABA0B6EB09322E3uLL;
-    z = (z ^ (z >> 32)) * 0xDABA0B6EB09322E3uLL;
-    return z ^ (z >> 32);
-}
-
-static double rand64(uint64_t *state) { // [0.0..1.0) exclusive to 1.0
-    return (double)random64(state) / ((double)UINT64_MAX + 1.0);
-}
-
 static void test4(void) {
     #ifdef DEBUG
     enum { bytes = 1 * 1024 * 1024, window = 2u << 12 };

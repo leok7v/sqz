@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#define _CRT_RAND_S // Microsoft rand_s() function
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -239,6 +240,32 @@ int32_t rt_exit(int exit_code) {
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+
+// pure convenience:
+
+static uint64_t rt_nanoseconds(void) {
+    // Returns nanoseconds since the epoch start, Midnight, January 1, 1970.
+    // The value will wrap around in the year ~2554.
+    struct timespec ts;
+    int r = timespec_get(&ts, TIME_UTC); (void)r;
+//  swear(r == TIME_UTC);
+    return (ts.tv_sec * 1000000000uLL + ts.tv_nsec);
+}
+
+static uint64_t rt_random64(uint64_t* state) {
+    // Linear Congruential Generator with inline mixing
+    thread_local static bool initialized; // must start with ODD seed!
+    if (!initialized) { initialized = true; *state |= 1; };
+    *state = (*state * 0xD1342543DE82EF95uLL) + 1;
+    uint64_t z = *state;
+    z = (z ^ (z >> 32)) * 0xDABA0B6EB09322E3uLL;
+    z = (z ^ (z >> 32)) * 0xDABA0B6EB09322E3uLL;
+    return z ^ (z >> 32);
+}
+
+static double rt_rand64(uint64_t *state) { // [0.0..1.0) exclusive to 1.0
+    return (double)rt_random64(state) / ((double)UINT64_MAX + 1.0);
+}
 
 static void rt_printf_test_utf8_and_emoji(void) {
     printf("\xF0\x9F\x98\x80 Hello\xF0\x9F\x91\x8B "

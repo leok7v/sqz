@@ -19,10 +19,14 @@
 #undef countof
 #undef max
 #undef min
+#undef nanoseconds
 #undef swap
 #undef swear
 #undef printf
 #undef println
+#undef println
+#undef rand64
+#undef random64
 
 #ifdef UNSTD_ASSERTS_IN_RELEASE
 #define assert(...)     rt_swear(__VA_ARGS__)
@@ -33,10 +37,13 @@
 #define countof(a)      rt_countof(a)
 #define max(a, b)       rt_max(a, b)
 #define min(a, b)       rt_min(a, b)
+#define nanoseconds()   rt_nanoseconds()
 #define swap(a, b)      rt_swap(a, b)
 #define swear(...)      rt_swear(__VA_ARGS__)
 #define printf(...)     rt_printf(__VA_ARGS__)
 #define println(...)    rt_println(__VA_ARGS__)
+#define rand64(s)       rt_rand64(s)
+#define random64(s)     rt_random64(s)
 
 #endif
 
