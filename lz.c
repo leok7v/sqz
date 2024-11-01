@@ -17,22 +17,22 @@
 #define trace(...) ((void)0)
 #endif
 
-enum { max_window = 2u << 16, max_len = 254 };
+enum { max_window = 1u << 16, max_len = 254 };
 
-struct lz77 {
+struct lz {
     const uint8_t* in; // pointer to array of bytes[n]
-    size_t   n;        // number of bytes in "in" array
-    size_t   i;        // current position in "in" array after window
+    size_t   n;        // number of bytes in `in` array
+    size_t   i;        // current position in `in` array after window
     size_t   w;        // window size
     // TODO: all the fields above is debugging convenience
     //       and can be passed as parameters to all the lz_* functions
     //       possibly assisting compiler to optimize better and use
     //       registers instead of writing values back to memory.
-    size_t   prev[max_window]; // previous "i" of 2 byte prefix
-    size_t   map2[1u << (sizeof(uint16_t) * 8)]; // "i" of 2 byte prefixes
+    size_t   prev[max_window]; // previous `i` of 2 byte prefix
+    size_t   map2[1u << (sizeof(uint16_t) * 8)]; // `i` of 2 byte prefixes
 };
 
-static void lz_init(struct lz77 *lz, const uint8_t* in, size_t n, size_t window) {
+static void lz_init(struct lz *lz, const uint8_t* in, size_t n, size_t window) {
     assert(n > 0);
     assert(2 <= window && window <= max_window);
     assert(((window - 1) & window) == 0); // window is power of 2
@@ -43,7 +43,7 @@ static void lz_init(struct lz77 *lz, const uint8_t* in, size_t n, size_t window)
     lz->w  = window;
 }
 
-static void lz_chain(struct lz77 *lz, size_t index) {
+static void lz_chain(struct lz *lz, size_t index) {
     const uint8_t* in = lz->in;
     const size_t i = lz->i;
     const size_t w = lz->w;
@@ -58,7 +58,7 @@ static void lz_chain(struct lz77 *lz, size_t index) {
     printf("\n");
 }
 
-static void lz_verify(struct lz77 *lz, size_t index) {
+static void lz_verify(struct lz *lz, size_t index) {
     const uint8_t* in = lz->in; (void)in;
     const size_t i = lz->i;
     const size_t w = lz->w;
@@ -71,11 +71,11 @@ static void lz_verify(struct lz77 *lz, size_t index) {
     }
 }
 
-static void lz_insert(struct lz77* lz) {
+static void lz_insert(struct lz* lz) {
     const uint8_t* in = lz->in;
-    const size_t   n = lz->n;
-    const size_t   i = lz->i;
-    const size_t   w = lz->w;
+    const size_t n = lz->n;
+    const size_t i = lz->i;
+    const size_t w = lz->w;
     if (i < n - 1) {
         const uint16_t prefix = in[i] | (in[i + 1] << 8);
         const size_t index = i % lz->w;
@@ -90,7 +90,7 @@ static void lz_insert(struct lz77* lz) {
             if (i - pp <= w) {
                 assert(in[pp] == in[i] && in[pp + 1] == in[i + 1]);
                 assert(pp < i);
-                trace("%zd\n", i - pp);
+                trace("%zu\n", i - pp);
                 lz->prev[index] = i - pp;
             } else {
                 trace("0 (out of window)\n");
@@ -101,7 +101,7 @@ static void lz_insert(struct lz77* lz) {
         trace("[%zd] map2[\"%c%c\":0x%04x(%u)] := %zu\n",
                i, in[i], in[i + 1], prefix, prefix, index + 1);
         #ifdef LZ_VERBOSE
-            chain(lz, index);
+            lz_chain(lz, index);
         #endif
         #ifdef DEBUG
             lz_verify(lz, index);
@@ -110,11 +110,12 @@ static void lz_insert(struct lz77* lz) {
 }
 
 // both lz_find and lz_search function search longest match
-// at a shortest distance from position "i" and return
+// at a shortest distance from position `i` and return
 // ml: [2..max_len] inclusive
 // md: [1..window] inclusive
 
-static inline void lz_find(struct lz77* lz, size_t *ml, size_t *md) {
+static inline void lz_find(struct lz* lz, size_t *ml, size_t *md) {
+    // TODO: store bits_in_window in `w` and use mask instead of modulo
     assert(*ml == 0);
     assert(*md == 0);
     const size_t n = lz->n;
@@ -123,7 +124,7 @@ static inline void lz_find(struct lz77* lz, size_t *ml, size_t *md) {
     const uint8_t* in = lz->in;
     trace("[%zd] \"%c%c\"\n", i, in[i], in[i + 1]);
     if (1 <= i && i < n - 1) {
-//      if (i == 15 && w == 8) rt_breakpoint();
+//      if (i == 29 && w == 2) { rt_breakpoint(); }
         size_t len = 0;
         size_t dst = 0;
         size_t p = lz->map2[in[i] | (in[i + 1] << 8)];
@@ -131,20 +132,22 @@ static inline void lz_find(struct lz77* lz, size_t *ml, size_t *md) {
             p--;
             assert(p < i && i - p <= w);
             size_t max_k = n - i > max_len ? max_len : n - i;
-            size_t k = 2; // start with 2 because:
             assert(in[p] == in[i] && in[p + 1] == in[i + 1]);
+            size_t index = p & (w - 1); // same as p % w for w = 2^x
+            size_t k = 2; // start with at least 2 because:
             while (k < max_k && in[p + k] == in[i + k]) { k++; }
             if (i - p <= w) { len = k; dst = i - p; }
-            size_t d = lz->prev[p % w];
-            while (len < max_len && d > 0 && d <= p && p - d < i && i <= p - d + w) {
+            size_t d = lz->prev[index];
+            assert(d == 0 || d <= p);
+            while (len < max_len && 0 < d && d <= p && p - d < i && i <= p - d + w) {
                 p -= d;
-                assert(in[p] == in[i] && in[p + 1] == in[i + 1]);
-                if (memcmp(in + p, in + i, len) == 0) {
-                    k = len; // because with "len" bytes are the same
+                if (len == 2 || memcmp(in + p + 2, in + i + 2, len - 2) == 0) {
+                    k = len; // because with `len` bytes are the same
                     while (k < max_k && in[p + k] == in[i + k]) { k++; }
                     if (k > len) { len = k; dst = i - p; }
                 }
-                d = lz->prev[p % w];
+                index = p & (w - 1); // same as p % w for w = 2^x
+                d = lz->prev[index];
             }
             *ml = len;
             *md = dst;
@@ -152,7 +155,7 @@ static inline void lz_find(struct lz77* lz, size_t *ml, size_t *md) {
     }
 }
 
-static void lz_search(struct lz77* lz, size_t *ml, size_t *md) { // linear
+static void lz_search(struct lz* lz, size_t *ml, size_t *md) { // linear
     assert(*ml == 0);
     assert(*md == 0);
     const size_t n = lz->n;
@@ -224,11 +227,12 @@ static void lz_search(struct lz77* lz, size_t *ml, size_t *md) { // linear
 
 uint64_t seed = 1; // random generator seed/state
 
-static int test(struct lz77* lz, const uint8_t* in, const size_t n,
+static int test(struct lz* lz, const uint8_t* in, const size_t n,
                 const size_t w, bool verbose) {
+    assert(w <= max_window);
     lz_init(lz, in, n, w);
+    #ifdef DEBUG
     if (verbose) {
-        printf("window: %zd\n", w);
         printf("\"%.*s\": %zu\n ", (int)n, in, n);
         for (size_t i = 0; i < n; i++) {
             printf("%d", i % 10);
@@ -239,6 +243,9 @@ static int test(struct lz77* lz, const uint8_t* in, const size_t n,
         }
         printf("\n");
     }
+    #else
+    (void)verbose;
+    #endif
     lz->i = 0;
     lz_insert(lz);
     while (lz->i < lz->n) {
@@ -249,9 +256,11 @@ static int test(struct lz77* lz, const uint8_t* in, const size_t n,
                 size_t ml2 = 0, md2 = 0;
                 lz_search(lz, &ml2, &md2);
                 if (ml1 > 0 || ml2 > 0) {
-                    if (ml1 != ml2 && md1 != md2) {
-                        printf("[%zd] longest %zd:%zd \"%.2s\" \n", lz->i, ml1, md1, lz->in + lz->i);
-                        printf("[%zd] linear  %zd:%zd \"%.2s\" \n", lz->i, ml2, md2, lz->in + lz->i);
+                    if (ml1 != ml2 || md1 != md2) {
+                        printf("[%zd] longest %zd:%zd \"%.2s\" \n",
+                               lz->i, ml1, md1, lz->in + lz->i);
+                        printf("[%zd] linear  %zd:%zd \"%.2s\" \n",
+                               lz->i, ml2, md2, lz->in + lz->i);
                     }
                     assert(ml1 == ml2 && md1 == md2);
                     if (ml1 != ml2 || md1 != md2) { return 1; }
@@ -279,22 +288,34 @@ static int test(struct lz77* lz, const uint8_t* in, const size_t n,
     return 0;
 }
 
-static int test1(struct lz77* lz) {
-    const char* in = "aaaaa";
-    return test(lz, (const uint8_t*)in, strlen(in), 2, true);
+static int test0(struct lz* lz) {
+    const char* in = "_abc;abd:abe_";
+    const size_t n = strlen(in);
+    const size_t w = 8;
+    printf("n: %6zd window: %5zd\n", n, w);
+    return test(lz, (const uint8_t*)in, n, w, true);
 }
 
-static int test2(struct lz77* lz) {
+static int test1(struct lz* lz) {
+    const char* in = "aaaaa";
+    const size_t n = strlen(in);
+    const size_t w = 2;
+    printf("n: %6zd window: %5zd\n", n, w);
+    return test(lz, (const uint8_t*)in, n, w, true);
+}
+
+static int test2(struct lz* lz) {
     const char* in = "a_aa_aa_aaa_aaaa_aaaaa_aaaa_aaa_aa_a";
     const size_t n = strlen(in);
     size_t max_w = n < max_window ? n : max_window;
     for (size_t w = 2; w < max_w; w += w) {
-        if (test(lz, (const uint8_t*)in, strlen(in), w, true)) { return 1; }
+        printf("n: %6zd window: %5zd\n", n, w);
+        if (test(lz, (const uint8_t*)in, n, w, true)) { return 1; }
     }
     return 0;
 }
 
-static int test3(struct lz77* lz) {
+static int test3(struct lz* lz) {
     enum { N = 16, M = 256, T = 32 };
     int pl[N] = { 0 };
     for (int t = 0; t < T; t++) {
@@ -315,35 +336,37 @@ static int test3(struct lz77* lz) {
         const size_t n = strlen((char*)in);
         size_t max_w = n < max_window ? n : max_window;
         for (size_t w = 2; w < max_w; w += w) {
+            printf("n: %6zd window: %5zd\n", n, w);
             if (test(lz, (const uint8_t*)in, n, w, false)) { return 1; }
         }
     }
     return 0;
 }
 
-static int test4(struct lz77* lz) {
+static int test4(struct lz* lz) {
     #if !defined(DEBUG) || defined(LZ_ALL_TESTS)
     #ifdef DEBUG
-        enum { n = max_window / 2, window = max_window / 8 };
+        enum { n = (max_window + 1) / 2, w = max_window / 8 };
     #else
-        enum { n = 32 * 1024 * 1024, window = max_window };
+        enum { n = 32 * 1024 * 1024, w = max_window };
     #endif
     static uint8_t in[n];
     memset(in, 0x00, n);
+    printf("n: %6d window: %5d\n", n, w);
     uint64_t t = nanoseconds();
-    int r = test(lz, in, n, window, false);
+    int r = test(lz, in, n, w, false);
     t = nanoseconds() - t;
     printf("Time: %6.3fs Throughput: %7.3f MiB/s\n",
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
     // 32MB on Mac Book Air 2024 M3
-    // RELEASE Time:  0.096s Throughput: 332.5 MiB/s
+    // RELEASE Time:  0.102s Throughput: 312.227 MiB/s
     return r;
     #else
     return lz == 0;
     #endif
 }
 
-static int test5(struct lz77* lz) {
+static int test5(struct lz* lz) {
     #if !defined(DEBUG) || defined(LZ_ALL_TESTS)
     #ifdef DEBUG
         enum { n = 128 * 1024};
@@ -355,19 +378,20 @@ static int test5(struct lz77* lz) {
         in[i] = (uint8_t)(256 * rand64(&seed));
     }
     uint64_t t = nanoseconds();
+    printf("n: %6d window: %5d\n", n, max_window);
     int r = test(lz, in, n, max_window, false);
     t = nanoseconds() - t;
     printf("Time: %6.3fs Throughput: %7.3f MiB/s\n",
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
     // 32MB on Mac Book Air 2024 M3
-    // RELEASE Time:  0.847s Throughput:  37.8 MiB/s
+    // RELEASE Time:  0.608s Throughput:  52.612 MiB/s
     return r;
     #else
     return lz == 0;
     #endif
 }
 
-static int test6(struct lz77* lz) {
+static int test6(struct lz* lz) {
     #if !defined(DEBUG) || defined(LZ_ALL_TESTS)
     #ifdef DEBUG
         enum { n = 128 * 1024};
@@ -388,12 +412,13 @@ static int test6(struct lz77* lz) {
         }
     }
     uint64_t t = nanoseconds();
+    printf("n: %6d window: %5d\n", n, max_window);
     int r = test(lz, in, n, max_window, false);
     t = nanoseconds() - t;
     printf("Time: %6.3fs Throughput: %7.3f MiB/s\n",
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
     // 64MB on Mac Book Air 2024 M3
-    // RELEASE Time:  2.653s Throughput:  24.1 MiB/s
+    // RELEASE Time:  1.159s Throughput:  55.222 MiB/s
     return r;
     #else
     return lz == 0;
@@ -402,7 +427,8 @@ static int test6(struct lz77* lz) {
 
 int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
-    static struct lz77 lz77;
-    struct lz77* lz = &lz77;
-    return test1(lz) || test2(lz) || test3(lz) || test4(lz) || test5(lz) || test6(lz);
+    static struct lz lz77;
+    struct lz* lz = &lz77;
+    return test0(lz) || test1(lz) || test2(lz) || test3(lz) ||
+           test4(lz) || test5(lz) || test6(lz);
 }
