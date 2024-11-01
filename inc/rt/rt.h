@@ -66,6 +66,13 @@ int32_t rt_exit(int exit_code);
 #define rt_println(...) rt_printf_implementation(__FILE__,          \
                         __LINE__, __func__, true, "" __VA_ARGS__)
 
+
+uint64_t rt_nanoseconds(void);
+
+uint64_t rt_random64(uint64_t* state);
+
+double rt_rand64(uint64_t *state); // [0.0..1.0) exclusive to 1.0
+
 int32_t rt_printf_implementation(const char* file, int32_t line,
                                  const char* func, bool append_line_feed,
                                  const char* format,
@@ -243,7 +250,7 @@ int32_t rt_exit(int exit_code) {
 
 // pure convenience:
 
-static uint64_t rt_nanoseconds(void) {
+uint64_t rt_nanoseconds(void) {
     // Returns nanoseconds since the epoch start, Midnight, January 1, 1970.
     // The value will wrap around in the year ~2554.
     struct timespec ts;
@@ -252,7 +259,7 @@ static uint64_t rt_nanoseconds(void) {
     return (ts.tv_sec * 1000000000uLL + ts.tv_nsec);
 }
 
-static uint64_t rt_random64(uint64_t* state) {
+uint64_t rt_random64(uint64_t* state) {
     // Linear Congruential Generator with inline mixing
     thread_local static bool initialized; // must start with ODD seed!
     if (!initialized) { initialized = true; *state |= 1; };
@@ -263,7 +270,7 @@ static uint64_t rt_random64(uint64_t* state) {
     return z ^ (z >> 32);
 }
 
-static double rt_rand64(uint64_t *state) { // [0.0..1.0) exclusive to 1.0
+double rt_rand64(uint64_t *state) { // [0.0..1.0) exclusive to 1.0
     return (double)rt_random64(state) / ((double)UINT64_MAX + 1.0);
 }
 
