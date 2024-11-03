@@ -23,15 +23,20 @@ enum { max_window = 1u << 16, min_len = 2, max_len = 254 };
 struct map_entry {
     const uint8_t* data;
     uint64_t hash;
-    int32_t  bytes; // 0 empty, -1 removed
 };
 
 struct map {
     struct map_entry* entry;
-    uint32_t n;
-    uint32_t entries;
-    uint32_t max_chain;
-    uint32_t max_bytes;
+    int32_t  n; // signed because map_get() returns -1
+    int32_t  bytes;
+    int32_t  entries;
+    // stats:
+    int32_t  max_chain;
+    uint64_t sum_chain;
+    uint64_t searches;
+    uint64_t inserted;
+    uint64_t removed;
+    uint64_t replaced;
 };
 
 struct lz {
@@ -47,16 +52,15 @@ struct lz {
     size_t   map2[1u << (sizeof(uint16_t) * 8)]; // `i` of 2 byte prefixes
     struct map map3;
     struct map map4;
-    struct map_entry* ent3[max_window * 2];
-    struct map_entry* ent4[max_window * 2];
+    struct map_entry me3[max_window * 3];
+    struct map_entry me4[max_window * 3];
 };
 
-static void    map_init(struct map* m, struct map_entry entry[], size_t n);
-static int32_t map_get(const struct map* m, const void* data, uint32_t bytes);
-static int32_t map_put(struct map* m, const void* data, uint32_t bytes);
-static void    map_best(struct map* m, const void* data, size_t bytes,
-                        uint32_t* distance, uint8_t* size, uint32_t window);
+static void    map_init(struct map* m, struct map_entry entry[], size_t n, int32_t bytes);
+static int32_t map_get(struct map* m, const void* data);
+static int32_t map_put(struct map* m, const void* data);
 static void    map_remove(struct map* m, int32_t i);
+static void    map_delete(struct map* m, const void* d);
 static void    map_clear(struct map *m);
 
 static void lz_init(struct lz *lz, const uint8_t* in, size_t n, size_t window) {
@@ -68,6 +72,8 @@ static void lz_init(struct lz *lz, const uint8_t* in, size_t n, size_t window) {
     lz->n  = n;
     lz->i  = 0;
     lz->w  = window;
+    map_init(&lz->map3, lz->me3, sizeof(lz->me3) / sizeof(lz->me3[0]), 3);
+    map_init(&lz->map4, lz->me4, sizeof(lz->me4) / sizeof(lz->me4[0]), 4);
 }
 
 static void lz_chain(struct lz *lz, size_t index) {
@@ -103,7 +109,26 @@ static void lz_insert(struct lz* lz) {
     const size_t n = lz->n;
     const size_t i = lz->i;
     const size_t w = lz->w;
-    if (i < n - 1) {
+    if (i < n - 4) {
+        if (i >= w) {
+            int32_t i3 = map_get(&lz->map3, in + i - w);
+            if (i3 >= 0) {
+                size_t d = in + i - lz->map3.entry[i3].data;
+                if (d >= w) { map_remove(&lz->map3, i3); }
+            }
+            int32_t i4 = map_get(&lz->map4, in + i - w);
+            if (i4 >= 0) {
+                size_t d = in + i - lz->map4.entry[i4].data;
+                if (d >= w) { map_remove(&lz->map4, i4); }
+            }
+        }
+        int32_t me3 = lz->map3.entries;
+        int32_t me4 = lz->map4.entries;
+        swear(me3 <= max_window, "inserted: %lld removed: %lld replaced: %lld",
+            lz->map3.inserted, lz->map3.removed, lz->map3.replaced);
+        swear(me4 <= max_window);
+        map_put(&lz->map3, in + i);
+//      map_put(&lz->map4, in + i);
         const uint16_t prefix = in[i] | (in[i + 1] << 8);
         const size_t index = i % lz->w;
         size_t pp = lz->map2[prefix]; // previous position
@@ -150,7 +175,7 @@ static inline void lz_find(struct lz* lz, size_t *ml, size_t *md) {
     const size_t w = lz->w;
     const uint8_t* in = lz->in;
     trace("[%zd] \"%c%c\"\n", i, in[i], in[i + 1]);
-    if (1 <= i && i < n - 1) {
+    if (1 <= i && i < n - 4) {
 //      if (i == 29 && w == 2) { rt_breakpoint(); }
         size_t len = 0;
         size_t dst = 0;
@@ -188,7 +213,7 @@ static void lz_search(struct lz* lz, size_t *ml, size_t *md) { // linear
     const size_t n = lz->n;
     const size_t i = lz->i;
     const size_t w = lz->w;
-    if (1 <= i && i < n - 1) {
+    if (1 <= i && i < n - 4) {
         size_t len = 0;
         size_t dst = 0;
         const uint8_t* in = lz->in;
@@ -253,7 +278,6 @@ static void lz_search(struct lz* lz, size_t *ml, size_t *md) { // linear
 // maps
 // map_put()  is no operation if map is filled to 75% or more
 // map_get()  returns index of matching entry or -1
-// map_best() returns distance and size for best match
 
 // FNV Fowler Noll Vo hash function
 // https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
@@ -263,6 +287,9 @@ static const uint64_t map_hash_init = 0xCBF29CE484222325;
 
 // FNV prime for 64-bit
 static const uint64_t map_prime64   = 0x100000001B3;
+
+static const size_t map_deleted_unique = 0xC001F00Du;
+static const void*  map_deleted = &map_deleted_unique;
 
 static inline uint64_t map_hash64_byte(uint64_t hash, const uint32_t byte) {
     return (hash ^ (uint64_t)byte) * map_prime64;
@@ -277,123 +304,146 @@ static inline uint64_t map_hash64(const uint8_t* data, size_t bytes) {
     return hash;
 }
 
-static void map_init(struct map* m, struct map_entry entry[], size_t n) {
-    assert(16 < n && n < UINT32_MAX);
+static void map_init(struct map* m, struct map_entry entry[], size_t n, int32_t bytes) {
+    // map_get() returns index of matching entry or -1 which limits
+    // size of map to INT32_MAX
+    swear(16 < n && n < INT32_MAX);
+    swear(bytes == 3 || bytes == 4);
     m->entry = entry;
     m->n = (int32_t)n;
+    m->bytes = bytes;
     memset(m->entry, 0, n * sizeof(m->entry[0]));
     m->entries = 0;
     m->max_chain = 0;
-    m->max_bytes = 0;
+    m->sum_chain = 0;
+    m->searches = 0;
+    m->inserted = 0;
+    m->replaced = 0;
+    m->removed  = 0;
 }
 
-static int32_t map_get_hashed(const struct map* m, uint64_t hash,
-                              const void* d, uint32_t b) {
-    assert(2 <= b);
-    const struct map_entry* entries = m->entry;
-    size_t i = (size_t)hash % m->n;
-    while (entries[i].bytes != 0) {
-        if (entries[i].bytes == (int32_t)b && entries[i].hash == hash &&
-            memcmp(entries[i].data, d, b) == 0) {
-            return (int32_t)i;
-        }
-        i = (i + 1) % m->n;
+static void map_reduce_chain(struct map* m, int32_t i) {
+    assert(m->entry[i].data == map_deleted);
+    const int32_t n = m->n;
+    int32_t k = i + 1;
+    while (k < i + n && m->entry[k % n].data == map_deleted) { k++; }
+    if (!m->entry[(i + k + 1) % n].data) {
+//      printf("%d\n", k - i);
+        for (int32_t j = i; j < k; j++) { m->entry[j % n].data = null; }
     }
-    return -1;
 }
 
-static int32_t map_get(const struct map* m, const void* d, uint32_t b) {
-    return map_get_hashed(m, map_hash64(d, b), d, b);
+static int32_t map_get_hashed(struct map* m, uint64_t h, const void* d) {
+    const struct map_entry* en = m->entry;
+    const int32_t n = m->n;
+    const int32_t b = m->bytes;
+    int32_t i = (int32_t)(h % n);
+    int32_t f = -1; // found index
+    int32_t c = 0;  // chain
+    int32_t dix = -1; // first deleted index seen
+    bool all_deleted_after_dix = true; // assumption
+    const struct map_entry* e = en + i;
+    while (e->data && f < 0) {
+        bool deleted = e->data == map_deleted;
+        if (dix <  0 &&  deleted) { dix = i; }
+        if (dix >= 0 && !deleted) { all_deleted_after_dix = false; }
+        if (e->data != map_deleted && e->hash == h &&
+            memcmp(e->data, d, b) == 0) {
+            f = i;
+        } else {
+            i = (i + 1) % m->n;
+            e = en + i;
+            c++;
+        }
+    }
+    if (dix >= 0 && all_deleted_after_dix) { map_reduce_chain(m, dix); }
+    if (c > m->max_chain) { m->max_chain = c;
+printf("bytes: %d max_chain: %d entries: %d\n", b, c, m->entries);
+}
+    m->sum_chain += c;
+    m->searches++;
+    return f;
+}
+
+static int32_t map_get(struct map* m, const void* d) {
+    int32_t i = map_get_hashed(m, map_hash64(d, m->bytes), d);
+    return i;
 }
 
 static void map_remove(struct map* m, int32_t i) {
-    assert(m->entry[i].bytes > 0 && m->entries > 0);
-    m->entry[i].bytes = -1;
-    m->entry[i].data = null;
+    struct map_entry* e = m->entry + i;
+    assert(m->entries > 0 && e->data && e->data != map_deleted);
+    e->hash = 0;
+    e->data = map_deleted;
+    m->removed++;
     m->entries--;
+    map_reduce_chain(m, i);
 }
 
-static int32_t map_put(struct map* m, const void* data, uint32_t b) {
-    const uint8_t* d = (const uint8_t*)data;
+static void map_delete(struct map* m, const void* d) {
+    int32_t i = map_get(m, d);
+    if (i >= 0) { map_remove(m, i); }
+}
+
+static int32_t map_put(struct map* m, const void* data) {
+    int32_t f = -1; // found index
+    const uint8_t*  d = (const uint8_t*)data;
+    const int32_t   n = m->n;
+    const int32_t   b = m->bytes;
+    const int32_t n34 = m->n * 3 / 4;
     enum { max_bytes = sizeof(m->entry[0]) - 1 };
     assert(2 <= b && b <= UINT32_MAX);
-    if (m->entries < m->n * 3 / 4) {
-        struct map_entry* entries = m->entry;
-        uint64_t hash = map_hash64(d, b);
-        size_t i = (size_t)hash % m->n;
-        uint32_t chain = 0; // max chain length
-        while (entries[i].bytes != 0) {
-            if (entries[i].bytes == (int32_t)b && entries[i].hash == hash &&
-                memcmp(entries[i].data, d, b) == 0) {
-                assert(d >= entries[i].data); // shorter distance
-                entries[i].data = d; // update to shorter distance
-                return (int32_t)i;   // found match with existing entry
-            }
-            chain++;
-            i = (i + 1) % m->n;
-            assert(chain < m->n); // looping endlessly?
-        }
-        if (chain > m->max_chain) { m->max_chain = chain; }
-        if (b > m->max_bytes) { m->max_bytes = b; }
-        entries[i].data = d;
-        entries[i].hash = hash;
-        entries[i].bytes = b;
-        m->entries++;
-        return (int32_t)i;
-    }
-    return -1;
-}
-
-static void map_best(struct map* m, const void* data, size_t bytes,
-                     uint32_t* distance, uint8_t* size, uint32_t max_distance) {
-    *size = 0;
-    *distance = 0;
-    const uint8_t* d = (uint8_t*)data;
-    int32_t best = -1; // best (longest) result
-    if (bytes >= min_len) {
-        const uint32_t b = (uint32_t)(bytes < UINT32_MAX ? bytes : UINT32_MAX);
-        uint64_t hash = map_hash64_byte(map_hash_init, d[0]);
-        hash = map_hash64_byte(hash, d[1]);
-        for (uint8_t i = 2; i < b - 1; i++) {
-            hash = map_hash64_byte(hash, d[i]);
-            int32_t r = map_get_hashed(m, hash, data, i + 1);
-            if (r != -1 && (size_t)(d - m->entry[r].data) >= max_distance) {
-                map_remove(m, r);
-            } else if (r != -1) {
-                best = r;
+    if (m->entries > n34) {
+        swear(m->entries <= n34); // too many entries
+    } else {
+        struct map_entry* en = m->entry;
+        const uint64_t h = map_hash64(d, b);
+        int32_t i = (int32_t)(h % n);
+        int32_t c = 0; // max chain length
+        bool all_deleted_after_dix = true; // assumption
+        int32_t dix = -1; // first deleted index seen
+        struct map_entry* e = en + i;
+        while (e->data && f < 0) {
+            const bool deleted = e->data == map_deleted;
+            if (!deleted && e->hash == h && memcmp(e->data, d, b) == 0) {
+                f = i;   // found match with existing entry
             } else {
-                break;
+                if (dix <  0 &&  deleted) { dix = i; }
+                if (dix >= 0 && !deleted) { all_deleted_after_dix = false; }
+                c++;
+                assert(c <= n34);
+                i = (i + 1) % n;
+                e = en + i;
             }
         }
-    }
-    if (best >= 0) {
-        *distance = (uint32_t)(d - m->entry[best].data);
-        assert(*distance < max_distance);
-        uint32_t b = m->entry[best].bytes;
-        const uint8_t* p0 = m->entry[best].data + b;
-        const uint8_t* p1 = d + b;
-        const uint8_t* pe = d + bytes;
-        uint32_t ex = b;
-        while (p1 < pe && *p0 == *p1 && ex < max_len) {
-            ex++;
-            p0++;
-            p1++;
+        if (f < 0) {
+            assert(!e->data);
+            if (dix >= 0) {
+                if (all_deleted_after_dix) { map_reduce_chain(m, dix); }
+                i = dix;  // put into first slot marked as deleted
+                e = en + i;
+            }
+            e->data = d;
+            e->hash = h;
+            m->inserted++;
+            m->entries++;
+        } else {
+            assert(e->hash == h && e->data < d);
+            e->data = d; // update to shorter distance
+            m->replaced++;
         }
-        assert(ex <= max_len);
-        *size = (uint8_t)ex;
-        if (ex != b) {
-            assert(memcmp(m->entry[best].data, d, ex) == 0);
-            printf("[%d] best_bytes: %d extended to: %d\n", best, b, ex);
-            map_put(m, d, ex);
-        }
+        if (c > m->max_chain) { m->max_chain = c;
+printf("bytes: %d max_chain: %d entries: %d\n", b, c, m->entries);
+}
+        // stats:
+        m->sum_chain += c;
+        m->searches++;
     }
+    return f;
 }
 
 static void map_clear(struct map *m) {
-    memset(m->entry, 0, m->n * sizeof(m->entry[0]));
-    m->entries = 0;
-    m->max_chain = 0;
-    m->max_bytes = 0;
+    memset(m, 0, sizeof(*m));
 }
 
 // tests:
@@ -422,7 +472,7 @@ static int test(struct lz* lz, const uint8_t* in, const size_t n,
     lz->i = 0;
     lz_insert(lz);
     while (lz->i < lz->n) {
-        if (1 <= lz->i && lz->i < lz->n - 1) {
+        if (1 <= lz->i && lz->i < lz->n - 4) {
             size_t ml1 = 0, md1 = 0;
             lz_find(lz, &ml1, &md1);
             #ifdef DEBUG
@@ -490,6 +540,7 @@ static int test2(struct lz* lz) {
 
 static int test3(struct lz* lz) {
     enum { N = 16, M = 256, T = 32 };
+//  enum { N = 16, M = 256 * 1024, T = 32 };
     int pl[N] = { 0 };
     for (int t = 0; t < T; t++) {
         for (int i = 0; i < 16; i++) {
@@ -533,6 +584,8 @@ static int test4(struct lz* lz) {
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
     // 32MB on Mac Book Air 2024 M3
     // RELEASE Time:  0.102s Throughput: 312.227 MiB/s
+    printf("map3: max_chain: %zd map4: max_chain: %zd\n",
+           lz->map3.max_chain, lz->map4.max_chain);
     return r;
     #else
     return lz == 0;
@@ -542,7 +595,8 @@ static int test4(struct lz* lz) {
 static int test5(struct lz* lz) {
     #if !defined(DEBUG) || defined(LZ_ALL_TESTS)
     #ifdef DEBUG
-        enum { n = 128 * 1024};
+//      enum { n = 128 * 1024};
+        enum { n = 256 * 1024};
     #else
         enum { n = 32 * 1024 * 1024};
     #endif
@@ -558,6 +612,10 @@ static int test5(struct lz* lz) {
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
     // 32MB on Mac Book Air 2024 M3
     // RELEASE Time:  0.608s Throughput:  52.612 MiB/s
+    double chain3 = (double)lz->map3.sum_chain / lz->map3.searches;
+    double chain4 = (double)lz->map4.sum_chain / lz->map4.searches;
+    printf("map3: max_chain: %zd (%.1f) map4: max_chain: %zd (%.1f)\n",
+           lz->map3.max_chain, chain3, lz->map4.max_chain, chain4);
     return r;
     #else
     return lz == 0;
@@ -592,16 +650,19 @@ static int test6(struct lz* lz) {
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
     // 64MB on Mac Book Air 2024 M3
     // RELEASE Time:  1.159s Throughput:  55.222 MiB/s
+    printf("map3: max_chain: %zd map4: max_chain: %zd\n",
+           lz->map3.max_chain, lz->map4.max_chain);
     return r;
     #else
     return lz == 0;
     #endif
 }
 
-int main(int argc, const char* argv[]) {
+int xxx_main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
     static struct lz lz77;
     struct lz* lz = &lz77;
+    return test5(lz);
     return test0(lz) || test1(lz) || test2(lz) || test3(lz) ||
            test4(lz) || test5(lz) || test6(lz);
 }
