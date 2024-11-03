@@ -182,6 +182,30 @@ static inline bool map_put4(struct map* m, const void* p, uint32_t b4) {
     return map_put(m, p, map_hash(m, b4), b4);
 }
 
+/*
+    Future improvements:
+
+    It is possible to implement circular window[1 << max_window] and
+    move start pointer putting incoming LZ77 byte inside it.
+    This will allow to replace direct pointers to memory in the maps
+    by 32-bit unsigned offsets from the beginning of the window.
+    Why 32 bits not 16 because offset of the next byte pointer in lz77
+    is max_window (64KB) bytes away from the beginning of the window
+    offset. UINT32_MAX can be used as empty entry and UINT32_MAX - 1
+    as deleted.
+
+    It will reduce the memory bandwidth for p[*] pointers and half
+    their size on 64bit architectures and will also make stream
+    processing possible.
+
+    Comparing to 3 and 4 bytes not yet in the window is no issue
+    but expanding match beyond that may present a bit of complexity
+    in lz77 itself (wrap around bytes inside the window and pointer
+    to max_size incoming bytes). Not a big deal - doable.
+
+    Not a goal at the moment.
+*/
+
 // tests:
 
 #define MAP_LZ77_LOOKUP
