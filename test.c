@@ -209,8 +209,6 @@ static errno_t locate_test_folder(void) {
     }
 }
 
-static void experiment(void);
-
 int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
     printf("Window: 2^%d %d sizeof(size_t): %d sizeof(int): %d\n",
