@@ -14,8 +14,8 @@ struct map { // single threaded use only
     const void** p; // p[n]
     size_t   n;
     uint32_t m; // mask 0xFFFFFF for 3 bytes and 0xFFFFFFFFu for 4 bytes
-    size_t   e; // number of entries in the map
     #ifdef MAP_STATS
+    size_t   e; // number of entries in the map
     size_t   c; // stats: max chain
     uint64_t q; // stats: number of put/get queries
     uint64_t t; // stats: total sum of chains in all queries
@@ -29,7 +29,6 @@ static bool map_get4(struct map* m, uint32_t b4, size_t* ix);
 static bool map_put3(struct map* m, const void* p, uint32_t b3);
 static bool map_put4(struct map* m, const void* p, uint32_t b4);
 static void map_remove(struct map* m, size_t ix);
-
 
 static const size_t map_deleted_ = 0xC001F00Du;
 static const void*  map_deleted  = &map_deleted_;
@@ -47,12 +46,8 @@ static size_t map_prime_under(size_t n) {
     return table_of_primes[bit];
 }
 
-// Bob Jenkins' hash function below has been compared and
-// measured against more complex MurmurHash2A MurmurHash3
-// and xxHash and no significant differences were found
-
 static inline uint32_t map_hash_key(uint32_t k) {
-    k ^= k >> 13;
+    k ^= k >> 13; // Bob Jenkins' hash
     k *= 0x85EBCA6Bu;
     k ^= k >> 16;
     return k;
@@ -87,13 +82,10 @@ static inline bool map_get_hashed(struct map* m, uint32_t k,
     bool reduced = false;
     #ifdef MAP_STATS
     m->q++;       // stats
-    size_t c = 0; // stats: chain
+    size_t c = 1; // stats: chain
+    m->t++; // total
     #endif
     while (m->p[i]) {
-        #ifdef MAP_STATS
-        m->t++; // total
-        if (++c > m->c) { m->c = c; }
-        #endif
         const bool deleted = m->p[i] == map_deleted;
         const bool not_deleted_and_equal = !deleted &&
                    (mask & *((uint32_t*)m->p[i])) == k;
@@ -106,6 +98,10 @@ static inline bool map_get_hashed(struct map* m, uint32_t k,
                 reduced = true;
             }
             i = (i + 1) % m->n;
+            #ifdef MAP_STATS
+            m->t++; // total
+            if (++c > m->c) { m->c = c; }
+            #endif
         }
     }
     return false;
@@ -122,10 +118,12 @@ static inline bool map_get4(struct map* m, uint32_t b4, size_t* ix) {
 }
 
 static inline void map_remove(struct map* m, size_t ix) {
+    #ifdef MAP_STATS
     assert(m->e > 0);
+    m->e--;
+    #endif
     m->p[ix] = m->p[(ix + 1) % m->n] ? map_deleted : 0;
     if (m->p[ix]) { map_reduce_chain(m, ix); }
-    m->e--;
 }
 
 static inline bool map_put(struct map* m, const void* p,
@@ -134,14 +132,11 @@ static inline bool map_put(struct map* m, const void* p,
     size_t d = (size_t)-1; // index of first deleted
     size_t i = h;
     #ifdef MAP_STATS
-    m->q++;       // stats
-    size_t c = 0; // stats: chain
+    m->q++;       // queries
+    size_t c = 0; // chain
+    m->t++;       // total
     #endif
     while (m->p[i]) {
-        #ifdef MAP_STATS
-        m->t++; // total
-        if (++c > m->c) { m->c = c; }
-        #endif
         const bool deleted = m->p[i] == map_deleted;
         const bool not_deleted_and_equal = !deleted &&
                    (mask & *((uint32_t*)m->p[i])) == k;
@@ -154,6 +149,10 @@ static inline bool map_put(struct map* m, const void* p,
         } else {
             if (deleted && d == (size_t)-1) { d = i; }
             i = (i + 1) % m->n;
+            #ifdef MAP_STATS
+            m->t++;
+            if (++c > m->c) { m->c = c; }
+            #endif
             assert(i != h); // in theory should not happen
             if (i == h) { // overflow
                 if (d == (size_t)-1) { return false; }
@@ -167,7 +166,9 @@ static inline bool map_put(struct map* m, const void* p,
     } else {
         m->p[i] = p;
     }
+    #ifdef MAP_STATS
     m->e++;
+    #endif
     return true;
 }
 
@@ -182,6 +183,9 @@ static inline bool map_put4(struct map* m, const void* p, uint32_t b4) {
 }
 
 // tests:
+
+#define MAP_LZ77_LOOKUP
+#undef  MAP_LZ77_LOOKUP
 
 static void map_stats(const struct map* m) {
     #ifdef MAP_STATS
@@ -218,6 +222,7 @@ static void sliding_window(struct map* m3, struct map* m4,
                 map_remove(m4, ix);
             }
         }
+        #ifdef MAP_LZ77_LOOKUP
         {
             // lz77 like lookup:
             size_t ix;
@@ -226,19 +231,25 @@ static void sliding_window(struct map* m3, struct map* m4,
             b = map_get4(m4, b4, &ix);
             if (b) { c4++; }
         }
+        #endif
         // insert:
-        if (m3->e >= window) { map_stats(m3); }
-        if (m4->e >= window) { map_stats(m4); }
-        assert(m3->e < window && m4->e < window);
         b = map_put3(m3, in + i, b3);
         if (!b) { map_stats(m3); }
         assert(b);
+        #ifdef MAP_STATS
+        if (m3->e > window) { map_stats(m3); }
+        assert(m3->e <= window);
+        #endif
         b = map_put4(m4, in + i, b4);
         if (!b) { map_stats(m4); }
         assert(b);
+        #ifdef MAP_STATS
+        if (m4->e > window) { map_stats(m4); }
+        assert(m4->e <= window);
+        #endif
     }
     t = nanoseconds() - t;
-    printf("%6.3fs Throughput: %7.3f MiB/s c3:%d c4:%d\n",
+    printf("%6.3fs Throughput: %5.1f MiB/s c3:%d c4:%d\n",
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024), c3, c4);
     map_stats(m3);
     map_stats(m4);
@@ -309,7 +320,7 @@ static errno_t locate_test_folder(void) {
 
 /*
 
-2024 MacBook Air M3 processor
+2024 MacBook Air M3 processor ARM64 Release build MSVC 2024
 
 with MAP_STATS:
 
@@ -326,14 +337,14 @@ sliding_window 0.057s Throughput:  10.462 MiB/s count3:4000 count4:414
 map_stats      map3 stats e:65297 c:52 q:1818152 t:810971 a:1.446
 map_stats      map4 stats e:65503 c:49 q:1818152 t:826612 a:1.455
 
-without MAP_STATS:
+without MAP_STATS and without MAP_LZ77_LOOKUP:
 
 test random 16777216
-sliding_window  2.759s Throughput:   5.800 MiB/s c3:64699 c4:447
+sliding_window  1.941s Throughput:   8.244 MiB/s
 test           bible.txt 4436173
-sliding_window  0.054s Throughput:  78.169 MiB/s c3:4349567 c4:4081387
+sliding_window  0.042s Throughput: 101.627 MiB/s
 test           mandrill.png 627896
-sliding_window  0.058s Throughput:  10.240 MiB/s c3:4000 c4:414
+sliding_window  0.044s Throughput:  13.520 MiB/s
 
 */
 
