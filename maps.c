@@ -4,15 +4,22 @@
 
 enum { max_window = 1u << 16, min_len = 2, max_len = 254 };
 
+#ifdef DEBUG
+#define MAP_STATS
+#else
+#undef  MAP_STATS
+#endif
+
 struct map { // single threaded use only
     const void** p; // p[n]
     size_t   n;
     uint32_t m; // mask 0xFFFFFF for 3 bytes and 0xFFFFFFFFu for 4 bytes
     size_t   e; // number of entries in the map
-    #ifdef MAPS_STATS
+    #ifdef MAP_STATS
     size_t   c; // stats: max chain
     uint64_t q; // stats: number of put/get queries
     uint64_t t; // stats: total sum of chains in all queries
+    uint64_t r; // stats: number of replaced items
     #endif
 };
 
@@ -23,9 +30,6 @@ static bool map_put3(struct map* m, const void* p, uint32_t b3);
 static bool map_put4(struct map* m, const void* p, uint32_t b4);
 static void map_remove(struct map* m, size_t ix);
 
-#ifdef DEBUG
-#define MAP_STATS
-#endif
 
 static const size_t map_deleted_ = 0xC001F00Du;
 static const void*  map_deleted  = &map_deleted_;
@@ -36,7 +40,7 @@ static size_t map_prime_under(size_t n) {
         32749, 65521, 131071, 262139, 524287, 1048573, 2097143, 4194301,
         8388593, 16777213
     };
-    assert(4 <= n && ((n - 1) & n) == 0 && n <= (1u << 24));
+    swear(4 <= n && ((n - 1) & n) == 0 && n <= (1u << 24));
     uint8_t bit = 0;
     size_t bits = 1 << 2;
     while (bits < n) { bits <<= 1; bit++; }
@@ -59,7 +63,7 @@ static inline size_t map_hash(struct map* m, uint32_t k) {
 }
 
 static void map_init(struct map* m, uint8_t** p, size_t n, size_t b) {
-    assert(16 < n && n <= (1u << 24) && 3 <= b && b <= 4);
+    swear(16 < n && n <= (1u << 24) && 3 <= b && b <= 4);
     memset(m, 0, sizeof(*m));
     m->p = p;
     m->n = map_prime_under(n);
@@ -81,11 +85,15 @@ static inline bool map_get_hashed(struct map* m, uint32_t k,
                                   size_t i, size_t* ix) {
     const uint32_t mask = m->m;
     bool reduced = false;
-    #ifdef MAPS_STATS
+    #ifdef MAP_STATS
     m->q++;       // stats
     size_t c = 0; // stats: chain
     #endif
     while (m->p[i]) {
+        #ifdef MAP_STATS
+        m->t++; // total
+        if (++c > m->c) { m->c = c; }
+        #endif
         const bool deleted = m->p[i] == map_deleted;
         const bool not_deleted_and_equal = !deleted &&
                    (mask & *((uint32_t*)m->p[i])) == k;
@@ -97,56 +105,55 @@ static inline bool map_get_hashed(struct map* m, uint32_t k,
                 map_reduce_chain(m, i);
                 reduced = true;
             }
-            #ifdef MAPS_STATS
-            m->t++; // total
-            if (++c > m->c) { m->c = c; }
-            #endif
             i = (i + 1) % m->n;
         }
     }
     return false;
 }
 
-static bool map_get3(struct map* m, uint32_t b3, size_t* ix) {
-    assert((b3 & ~0xFFFFFFu) == 0 && m->b == 3);
+static inline bool map_get3(struct map* m, uint32_t b3, size_t* ix) {
+    assert((b3 & ~0xFFFFFFu) == 0 && m->m == 0x00FFFFFFu);
     return map_get_hashed(m, b3, map_hash(m, b3), ix);
 }
 
-static bool map_get4(struct map* m, uint32_t b4, size_t* ix) {
-    assert(m->b == 4);
+static inline bool map_get4(struct map* m, uint32_t b4, size_t* ix) {
+    assert(m->m == 0xFFFFFFFFu);
     return map_get_hashed(m, b4, map_hash(m, b4), ix);
 }
 
-static void map_remove(struct map* m, size_t ix) {
+static inline void map_remove(struct map* m, size_t ix) {
     assert(m->e > 0);
     m->p[ix] = m->p[(ix + 1) % m->n] ? map_deleted : 0;
     if (m->p[ix]) { map_reduce_chain(m, ix); }
     m->e--;
 }
 
-static bool map_put_h(struct map* m, const void* p,
+static inline bool map_put(struct map* m, const void* p,
                       const size_t h, uint32_t k) {
     const uint32_t mask = m->m;
     size_t d = (size_t)-1; // index of first deleted
     size_t i = h;
-    #ifdef MAPS_STATS
+    #ifdef MAP_STATS
     m->q++;       // stats
     size_t c = 0; // stats: chain
     #endif
     while (m->p[i]) {
+        #ifdef MAP_STATS
+        m->t++; // total
+        if (++c > m->c) { m->c = c; }
+        #endif
         const bool deleted = m->p[i] == map_deleted;
         const bool not_deleted_and_equal = !deleted &&
                    (mask & *((uint32_t*)m->p[i])) == k;
         if (not_deleted_and_equal) {
+            #ifdef MAP_STATS
+            m->r++; // replacing existing key
+            #endif
             m->p[i] = p;
             return true;
         } else {
             if (deleted && d == (size_t)-1) { d = i; }
             i = (i + 1) % m->n;
-            #ifdef MAPS_STATS
-            m->t++; // total
-            if (++c > m->c) { m->c = c; }
-            #endif
             assert(i != h); // in theory should not happen
             if (i == h) { // overflow
                 if (d == (size_t)-1) { return false; }
@@ -164,23 +171,24 @@ static bool map_put_h(struct map* m, const void* p,
     return true;
 }
 
-static bool map_put3(struct map* m, const void* p, uint32_t b3) {
-    assert((b3 & ~0xFFFFFFu) == 0 && m->b == 3);
-    return map_put_h(m, p, map_hash(m, b3), b3);
+static inline bool map_put3(struct map* m, const void* p, uint32_t b3) {
+    assert((b3 & ~0xFFFFFFu) == 0 && m->m == 0x00FFFFFFu);
+    return map_put(m, p, map_hash(m, b3), b3);
 }
 
-static bool map_put4(struct map* m, const void* p, uint32_t b4) {
-    assert(m->b == 4);
-    return map_put_h(m, p, map_hash(m, b4), b4);
+static inline bool map_put4(struct map* m, const void* p, uint32_t b4) {
+    assert(m->m == 0xFFFFFFFFu);
+    return map_put(m, p, map_hash(m, b4), b4);
 }
 
 // tests:
 
 static void map_stats(const struct map* m) {
-    #ifdef MAPS_STATS
-    double a = m->q == 0 ? 0 : (double)m->t / (double)m->q;
-    printf("map%d stats e:%zu c:%zu q:%zu t:%zu a:%.3f\n",
-            m->m < UINT32_MAX ? 3 : 4, m->e, m->c, m->q, m->t, 1.0 + a);
+    #ifdef MAP_STATS
+    double a = m->q == 0 ? 0 : ((double)m->t / (double)m->q);
+    printf("map%d stats e:%zu c:%zu q:%llu t:%llu r:%llu a:%.3f\n",
+            m->m < UINT32_MAX ? 3 : 4, m->e, m->c, m->q, m->t,
+            m->r, a);
     #else
     (void)m;
     #endif
@@ -188,8 +196,8 @@ static void map_stats(const struct map* m) {
 
 static void sliding_window(struct map* m3, struct map* m4,
         uint8_t in[], size_t n, size_t window) {
-    size_t count3 = 0;
-    size_t count4 = 0;
+    size_t c3 = 0; // count of 3 bytes sequences found in the window
+    size_t c4 = 0;
     bool b = false;
     uint64_t t = nanoseconds();
     for (size_t i = 0; i < n; i++) {
@@ -210,12 +218,14 @@ static void sliding_window(struct map* m3, struct map* m4,
                 map_remove(m4, ix);
             }
         }
-        // lz77 like lookup:
-        size_t ix;
-        b = map_get3(m3, b3, &ix);
-        if (b) { count3++; }
-        b = map_get4(m4, b4, &ix);
-        if (b) { count4++; }
+        {
+            // lz77 like lookup:
+            size_t ix;
+            b = map_get3(m3, b3, &ix);
+            if (b) { c3++; }
+            b = map_get4(m4, b4, &ix);
+            if (b) { c4++; }
+        }
         // insert:
         if (m3->e >= window) { map_stats(m3); }
         if (m4->e >= window) { map_stats(m4); }
@@ -228,51 +238,60 @@ static void sliding_window(struct map* m3, struct map* m4,
         assert(b);
     }
     t = nanoseconds() - t;
-    printf("%6.3fs Throughput: %7.3f MiB/s count3:%d count4:%d\n",
-            t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024), count3, count4);
+    printf("%6.3fs Throughput: %7.3f MiB/s c3:%d c4:%d\n",
+            t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024), c3, c4);
     map_stats(m3);
     map_stats(m4);
 }
 
 static int test(void) {
-//  enum { window = 1 << 4, e = window * 4 };
     enum { window = 1 << 16, e = window * 4 };
+    // number of entries in the map is 4 times
+    // the window size. Experimental window * 2
+    // leads to enormous amount of collisions
+    // with 16 bit rand() generated array of bytes
     static uint8_t* p3[e];
     static uint8_t* p4[e];
     static struct map map3;
     static struct map map4;
     struct map* m3 = &map3;
     struct map* m4 = &map4;
-    printf("random\n");
-    #ifdef DEBUG
-    static uint8_t in[4 * 1024 * 1024]; // debug
-    #else
-    static uint8_t in[16 * 1024 * 1024]; // release
-    #endif
-    for (size_t i = 0; i < countof(in); i++) {
-        in[i] = (uint8_t)(256 * ((double)rand() / ((double)RAND_MAX + 1.0)));
+    {
+        #ifdef DEBUG
+        static uint8_t in[4 * 1024 * 1024]; // debug
+        #else
+        static uint8_t in[16 * 1024 * 1024]; // release
+        #endif
+        printf("random %zu\n", countof(in));
+        for (size_t i = 0; i < countof(in); i++) {
+            in[i] = (uint8_t)(256 * ((double)rand() / ((double)RAND_MAX + 1.0)));
+        }
+        map_init(m3, p3, e, 3);
+        map_init(m4, p4, e, 4);
+        sliding_window(m3, m4, in, countof(in), window);
     }
-    map_init(m3, p3, e, 3);
-    map_init(m4, p4, e, 4);
-    sliding_window(m3, m4, in, countof(in), window);
-    printf("bible.txt\n");
-    uint8_t* data = null;
-    size_t bytes = 0;
-    errno_t r = file_read_fully("test/bible.txt", &data, &bytes);
-    if (r != 0) { return r; }
-    map_init(m3, p3, e, 3);
-    map_init(m4, p4, e, 4);
-    sliding_window(m3, m4, data, bytes, window);
-    free(data);
-    printf("mandrill.png\n");
-    data = null;
-    bytes = 0;
-    r = file_read_fully("test/mandrill.png", &data, &bytes);
-    if (r != 0) { return r; }
-    map_init(m3, p3, e, 3);
-    map_init(m4, p4, e, 4);
-    sliding_window(m3, m4, data, bytes, window);
-    free(data);
+    {
+        uint8_t* data = null;
+        size_t bytes = 0;
+        errno_t r = file_read_fully("test/bible.txt", &data, &bytes);
+        if (r != 0) { return r; }
+        printf("bible.txt %zd\n", bytes);
+        map_init(m3, p3, e, 3);
+        map_init(m4, p4, e, 4);
+        sliding_window(m3, m4, data, bytes, window);
+        free(data);
+    }
+    {
+        uint8_t* data = null;
+        size_t bytes = 0;
+        errno_t r = file_read_fully("test/mandrill.png", &data, &bytes);
+        if (r != 0) { return r; }
+        printf("mandrill.png %zd\n", bytes);
+        map_init(m3, p3, e, 3);
+        map_init(m4, p4, e, 4);
+        sliding_window(m3, m4, data, bytes, window);
+        free(data);
+    }
     return 0;
 }
 
@@ -309,12 +328,12 @@ map_stats      map4 stats e:65503 c:49 q:1818152 t:826612 a:1.455
 
 without MAP_STATS:
 
-test random
-sliding_window 2.810s Throughput:   5.694 MiB/s count3:64699 count4:447
-test           bible.txt
-sliding_window 0.059s Throughput:  71.776 MiB/s count3:4349567 count4:4081387
-test           mandrill.png
-sliding_window 0.056s Throughput:  10.718 MiB/s count3:4000 count4:414
+test random 16777216
+sliding_window  2.759s Throughput:   5.800 MiB/s c3:64699 c4:447
+test           bible.txt 4436173
+sliding_window  0.054s Throughput:  78.169 MiB/s c3:4349567 c4:4081387
+test           mandrill.png 627896
+sliding_window  0.058s Throughput:  10.240 MiB/s c3:4000 c4:414
 
 */
 
