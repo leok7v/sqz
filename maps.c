@@ -23,7 +23,7 @@ struct map { // single threaded use only
     #endif
 };
 
-static void map_init(struct map* m, uint8_t** p, size_t n, size_t b);
+static void map_init(struct map* m, void** p, size_t n, size_t b);
 static bool map_get3(struct map* m, uint32_t b3, size_t* ix);
 static bool map_get4(struct map* m, uint32_t b4, size_t* ix);
 static bool map_put3(struct map* m, const void* p, uint32_t b3);
@@ -57,7 +57,7 @@ static inline size_t map_hash(struct map* m, uint32_t k) {
     return (size_t)(map_hash_key(k) % m->n);
 }
 
-static void map_init(struct map* m, uint8_t** p, size_t n, size_t b) {
+static void map_init(struct map* m, void** p, size_t n, size_t b) {
     swear(16 < n && n <= (1u << 24) && 3 <= b && b <= 4);
     memset(m, 0, sizeof(*m));
     m->p = p;
@@ -330,18 +330,6 @@ static int test(void) {
     return 0;
 }
 
-static errno_t locate_test_folder(void) {
-    // on Unix systems with "make" executable usually resided
-    // and is run from root of repository... On Windows with
-    // MSVC it is buried inside bin/... folder depths
-    // on X Code in MacOS it can be completely out of tree.
-    // So we need to find the test files.
-    for (;;) {
-        if (file_exist("test/bible.txt")) { return 0; }
-        if (file_chdir("..") != 0) { return errno; }
-    }
-}
-
 /*
 
 2024 MacBook Air M3 processor ARM64 Release build MSVC 2024
@@ -372,8 +360,16 @@ sliding_window  0.044s Throughput:  13.520 MiB/s
 
 */
 
-int main(int argc, const char* argv[]) {
+static errno_t locate_test_folder(void) {
+    for (;;) {
+        if (file_exist("test/bible.txt")) { return 0; }
+        if (file_chdir("..") != 0) { return errno; }
+    }
+}
+
+int maps_main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
-    locate_test_folder();
+    errno_t r = locate_test_folder();
+    if (r != 0) { return r; }
     return test();
 }
