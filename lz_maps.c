@@ -103,15 +103,14 @@ static void lz_insert(struct lz* lz) {
         if (i >= w) {
             uint32_t w4 = *((uint32_t*)(in + i - w));
             uint32_t w3 = w4 & 0xFFFFFF;
-            uint32_t w2 = w3 & 0xFFFF; (void)w2; // TODO: will need later
             size_t ix;
             b = map_get3(&lz->map3, w3, &ix);
             // TODO: ??? <= or < ???
-            if (b && (uint8_t*)lz->map3.p[ix] < in + i - w) {
+            if (b && (uint8_t*)lz->map3.p[ix] <= in + i - w) {
                 map_remove(&lz->map3, ix);
             }
             b = map_get4(&lz->map4, w4, &ix);
-            if (b && (uint8_t*)lz->map4.p[ix] < in + i - w) {
+            if (b && (uint8_t*)lz->map4.p[ix] <= in + i - w) {
                 map_remove(&lz->map4, ix);
             }
         }
@@ -321,8 +320,9 @@ static inline void map_reduce_chain(struct map* m, size_t i) {
     }
 }
 
-static inline bool map_get_hashed(struct map* m, uint32_t k, size_t i,
+static inline bool map_get_hashed(struct map* m, uint32_t k, size_t s,
                                   size_t* ix) {
+    size_t i = s; // starting point
     const uint32_t mask = m->m;
     bool reduced = false;
     while (m->p[i]) {
@@ -338,6 +338,7 @@ static inline bool map_get_hashed(struct map* m, uint32_t k, size_t i,
                 reduced = true;
             }
             i = (i + 1) % m->n;
+            assert(i != s);
         }
     }
     return false;
@@ -549,11 +550,9 @@ static int test4(struct lz* lz) {
 static int test5(struct lz* lz) {
     #if !defined(DEBUG) || defined(LZ_ALL_TESTS)
     #ifdef DEBUG
-//      enum { n = 128 * 1024};
-        enum { n = 256 * 1024};
+        enum { n = 128 * 1024};
     #else
-//      enum { n = 32 * 1024 * 1024}; // TODO: restore
-        enum { n = 256 * 1024};
+        enum { n = 16 * 1024 * 1024};
     #endif
     static uint8_t in[n];
     for (int i = 0; i < n; i++) {
@@ -578,8 +577,7 @@ static int test6(struct lz* lz) {
     #ifdef DEBUG
         enum { n = 128 * 1024};
     #else
-//      enum { n = 64 * 1024 * 1024 }; // TODO: restore
-        enum { n =       256 * 1024 };
+        enum { n = 32 * 1024 * 1024 };
     #endif
     static uint8_t in[n];
     for (int i = 0; i < n; i++) {
@@ -630,7 +628,6 @@ static errno_t locate_test_folder(void) {
     }
 }
 
-
 int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
     errno_t r = locate_test_folder();
@@ -639,5 +636,6 @@ int main(int argc, const char* argv[]) {
     struct lz* lz = &lz77;
     return test0(lz) || test1(lz) || test2(lz) || test3(lz) ||
            test4(lz) || test5(lz) || test6(lz) ||
-           test_file(lz, "test/bible.txt");
+           test_file(lz, "test/bible.txt") ||
+           test_file(lz, "test/mandrill.png");
 }
