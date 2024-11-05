@@ -19,7 +19,7 @@
 #define trace(...) ((void)0)
 #endif
 
-enum { max_window = 1u << 16, min_len = 2, max_len = 254 };
+enum { min_window = 4, max_window = 1u << 16, min_len = 2, max_len = 254 };
 
 struct map { // single threaded use only
     const void** p; // p[n]
@@ -40,9 +40,9 @@ struct lz {
     size_t   map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes
     struct map map3;
     struct map map4;
-    // entries for the maps:
-    void* map3e[max_window * 4];
-    void* map4e[max_window * 4];
+    // entries for the maps (75% occupancy):
+    void* map3e[max_window + max_window / 2];
+    void* map4e[max_window + max_window / 2];
 };
 
 static void map_init(struct map* m, void** p, size_t n, size_t b);
@@ -54,7 +54,7 @@ static void map_remove(struct map* m, size_t ix);
 
 static void lz_init(struct lz *lz, const uint8_t* in, size_t n, size_t window) {
     assert(n > 0);
-    assert(2 <= window && window <= max_window);
+    assert(min_window <= window && window <= max_window);
     assert(((window - 1) & window) == 0); // window is power of 2
     memset(lz, 0, sizeof(*lz));
     lz->in = in;
@@ -205,11 +205,14 @@ assert(memcmp(in + p, in + i, 4) == 0);
             d = lz->prev[index];
         }
     }
-    // consider:
+    // for window == 2 consider sample below:
     // "a_aa_aa_aa" window = 2
     //  0123456789
     //  at in[i:3] len: 7 dst: 3
     // when map4[] and map3[] do not hold anything yet (w:2)
+    //
+    // but for window >= 4 the failure to find 4 or longer match
+    // means 3 and 2 bytes match do not need extension
     if (len == 0) {
         b = map_get3(&lz->map3, b4 & 0xFFFFFF, &ix);
         if (b) {
@@ -222,6 +225,7 @@ assert(memcmp(in + p, in + i, 3) == 0);
             size_t max_k = n - i > max_len ? max_len : n - i;
             size_t k = 3; // start with at least 3
             while (k < max_k && in[p + k] == in[i + k]) { k++; }
+assert(k == 3); // because min_window == 4 and we already searched for 4 bytes
             if (i - p <= w) { len = k; dst = i - p; }
         }
     }
@@ -235,6 +239,7 @@ assert(memcmp(in + p, in + i, 2) == 0);
             size_t max_k = n - i > max_len ? max_len : n - i;
             size_t k = 2; // start with at least 2
             while (k < max_k && in[p + k] == in[i + k]) { k++; }
+assert(k == 2); // because min_window == 4 and we already searched for 4 bytes
             if (i - p <= w) { len = k; dst = i - p; }
         }
     }
@@ -275,22 +280,6 @@ static void lz_linear(struct lz* lz, size_t *ml, size_t *md) {
 
 // maps
 
-static const size_t map_deleted_ = 0xC01DF00Du;
-static const void* map_deleted = &map_deleted_;
-
-static size_t map_prime_under(size_t n) {
-    static const size_t table_of_primes[] = {
-        3, 7, 13, 31, 61, 127, 251, 509, 1021, 2039, 4093, 8191, 16381,
-        32749, 65521, 131071, 262139, 524287, 1048573, 2097143, 4194301,
-        8388593, 16777213
-    };
-    assert(4 <= n && ((n - 1) & n) == 0 && n <= (1u << 24));
-    uint8_t bit = 0;
-    size_t bits = 1 << 2;
-    while (bits < n) { bits <<= 1; bit++; }
-    return table_of_primes[bit];
-}
-
 static inline uint32_t map_hash_key(uint32_t k) {
     k ^= k >> 13; // Bob Jenkins' hash
     k *= 0x85EBCA6Bu;
@@ -303,89 +292,88 @@ static inline size_t map_hash(struct map* m, uint32_t k) {
 }
 
 static void map_init(struct map* m, uint8_t** p, size_t n, size_t b) {
-    if (!(16 < n && n <= (1u << 24) && 3 <= b && b <= 4)) { exit(1); }
+    assert(16 < n && n <= (1u << 24) && 3 <= b && b <= 4);
+    if (!(16 < n && n <= (1u << 24) && 3 <= b && b <= 4)) {
+        exit(1); // this is not generic map implementation
+    }
     memset(m, 0, sizeof(*m));
     m->p = p;
-    m->n = map_prime_under(n);
+    m->n = n;
     m->m = b == 3 ? 0x00FFFFFFu : 0xFFFFFFFFu;
     memset(m->p, 0, n * sizeof(m->p[0]));
 }
 
-static inline void map_reduce_chain(struct map* m, size_t i) {
-    const size_t n = m->n;
-    size_t e = i + 1; // end of deleted sequence
-    while (e < i + n && m->p[e % n] == map_deleted) { e++; }
-    if (!m->p[e % n]) {
-        for (size_t j = i; j < e; j++) { m->p[j % n] = (void*)0; }
-    }
-}
-
-static inline bool map_get_hashed(struct map* m, uint32_t k, size_t s,
-                                  size_t* ix) {
-    size_t i = s; // starting point
+static inline bool map_get(struct map* m, uint32_t k,
+                                  const size_t s, size_t* ix) {
+    size_t i = s; // start
     const uint32_t mask = m->m;
-    bool reduced = false;
     while (m->p[i]) {
-        const bool deleted = m->p[i] == map_deleted;
-        const bool not_deleted_and_equal = !deleted &&
-                                           (mask & *((uint32_t*)m->p[i])) == k;
-        if (not_deleted_and_equal) {
+        if ((mask & *((uint32_t*)m->p[i])) == k) {
             *ix = i;
             return true;
         } else {
-            if (deleted && !reduced) {
-                map_reduce_chain(m, i);
-                reduced = true;
-            }
             i = (i + 1) % m->n;
-            assert(i != s);
+            if (i == s) { return false; }
         }
     }
     return false;
 }
 
-static inline bool map_get3(struct map* m, uint32_t b3, size_t* ix) {
-    assert((b3 & ~0xFFFFFFu) == 0 && m->m == 0x00FFFFFFu);
-    return map_get_hashed(m, b3, map_hash(m, b3), ix);
+static inline void map_remove(struct map* m, size_t i) {
+    m->p[i] = 0;
+    size_t x = i; // next
+    for (;;) {
+        x = (x + 1) % m->n;
+        if (!m->p[x]) { break; }
+        const uint32_t b4 = *(uint32_t*)m->p[x];
+        size_t h = map_hash(m, b4 & m->m);
+        // Check if `h` lies within [i, x), accounting for wrap-around:
+        if ((x < i) ^ (h <= i) ^ (h > x)) { // can move
+            m->p[i] = m->p[x];
+            m->p[x] = 0;
+            i = x;
+        }
+    }
 }
 
-static inline bool map_get4(struct map* m, uint32_t b4, size_t* ix) {
-    assert(m->m == 0xFFFFFFFFu);
-    return map_get_hashed(m, b4, map_hash(m, b4), ix);
-}
+/*
 
-static inline void map_remove(struct map* m, size_t ix) {
-    m->p[ix] = m->p[(ix + 1) % m->n] ? map_deleted : (void*)0;
-    if (m->p[ix]) { map_reduce_chain(m, ix); }
-}
+   Case 1: No wrap-around, i < x and h lies between i and x
+   [__0__|__1__|__2__|__3__|__4__|__5__|__6__|__7__]
+                i:2         h:4         x:6
+   In this case, i < x and h is within the straightforward range [i, x).
 
-static inline bool map_put(struct map* m, const void* p, const size_t h,
-                           uint32_t k) {
+   Case 2: Wrap-around, x < i, and h lies before i
+   [__0__|__1__|__2__|__3__|__4__|__5__|__6__|__7__]
+          h:1   x:2                     i:6
+   Here, with x < i and h <= i, h falls in the wrapped-around portion
+   [i, n-1] + [0, x).
+
+   Case 3: Wrap-around, x < i, and h lies beyond x
+   [__0__|__1__|__2__|__3__|__4__|__5__|__6__|__7__]
+                x:2                     i:6   h:7
+   In this case, x < i and h > x, so h is in the range [i, n-1] + [0, x).
+
+   This combined condition (x < i) ^ (h <= i) ^ (h > x) with exclusive OR
+   clauses accurately identifies if h is in [i, x), regardless of wrap-around.
+
+*/
+
+static inline bool map_put(struct map* m, const void* p,
+                      const size_t h, uint32_t k) {
     const uint32_t mask = m->m;
-    size_t d = (size_t)-1;
     size_t i = h;
     while (m->p[i]) {
-        const bool deleted = m->p[i] == map_deleted;
-        const bool not_deleted_and_equal = !deleted &&
-                                           (mask & *((uint32_t*)m->p[i])) == k;
-        if (not_deleted_and_equal) {
+        if ((mask & *((uint32_t*)m->p[i])) == k) {
             m->p[i] = p;
             return true;
         } else {
-            if (deleted && d == (size_t)-1) { d = i; }
             i = (i + 1) % m->n;
-            if (i == h) {
-                if (d == (size_t)-1) { return false; }
-                break;
-            }
+            assert(i != h); // in the way map is used should not happen
+            if (i == h) { return false; }
         }
     }
-    if (d != (size_t)-1) {
-        map_reduce_chain(m, d);
-        m->p[d] = p;
-    } else {
-        m->p[i] = p;
-    }
+    m->p[i] = p;
     return true;
 }
 
@@ -399,6 +387,15 @@ static inline bool map_put4(struct map* m, const void* p, uint32_t b4) {
     return map_put(m, p, map_hash(m, b4), b4);
 }
 
+static inline bool map_get3(struct map* m, uint32_t b3, size_t* ix) {
+    assert((b3 & ~0xFFFFFFu) == 0 && m->m == 0x00FFFFFFu);
+    return map_get(m, b3, map_hash(m, b3), ix);
+}
+
+static inline bool map_get4(struct map* m, uint32_t b4, size_t* ix) {
+    assert(m->m == 0xFFFFFFFFu);
+    return map_get(m, b4, map_hash(m, b4), ix);
+}
 
 // tests:
 
@@ -479,7 +476,7 @@ static int test0(struct lz* lz) {
 static int test1(struct lz* lz) {
     const char* in = "aaaaa";
     const size_t n = strlen(in);
-    const size_t w = 2;
+    const size_t w = min_window;
     printf("n: %6zd window: %5zd\n", n, w);
     return test(lz, (const uint8_t*)in, n, w, true);
 }
@@ -488,7 +485,7 @@ static int test2(struct lz* lz) {
     const char* in = "a_aa_aa_aaa_aaaa_aaaaa_aaaa_aaa_aa_a";
     const size_t n = strlen(in);
     size_t max_w = n < max_window ? n : max_window;
-    for (size_t w = 2; w < max_w; w += w) {
+    for (size_t w = min_window; w < max_w; w += w) {
         printf("n: %6zd window: %5zd\n", n, w);
         if (test(lz, (const uint8_t*)in, n, w, true)) { return 1; }
     }
@@ -516,7 +513,7 @@ static int test3(struct lz* lz) {
         assert(in[sizeof(in) - 1] == 0);
         const size_t n = strlen((char*)in);
         size_t max_w = n < max_window ? n : max_window;
-        for (size_t w = 2; w < max_w; w += w) {
+        for (size_t w = min_window; w < max_w; w += w) {
             trace("n: %6zd window: %5zd\n", n, w);
             if (test(lz, (const uint8_t*)in, n, w, false)) { return 1; }
         }
