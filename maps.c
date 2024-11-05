@@ -243,8 +243,8 @@ static inline bool map_put4(struct map* m, const void* p, uint32_t b4) {
 
 // tests:
 
-#undef  MAP_LZ77_LOOKUP
 #define MAP_LZ77_LOOKUP
+#undef  MAP_LZ77_LOOKUP
 
 static void map_stats(const struct map* m) {
     #ifdef MAP_STATS
