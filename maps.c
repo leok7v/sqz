@@ -10,7 +10,19 @@ enum { max_window = 1u << 16, min_len = 2, max_len = 254 };
 #undef  MAP_STATS
 #endif
 
-struct map { // single threaded use only
+#define MAP_VERBOSE
+#undef  MAP_VERBOSE
+
+#ifdef MAP_VERBOSE
+#define trace(...) printf(__VA_ARGS__)
+#else
+#define trace(...) (void)0
+#endif
+
+// single threaded open-addressed map with linear probing
+// and no tombstones
+
+struct map {
     const void** p; // p[n]
     size_t   n;
     uint32_t m; // mask 0xFFFFFF for 3 bytes and 0xFFFFFFFFu for 4 bytes
@@ -29,9 +41,6 @@ static bool map_get4(struct map* m, uint32_t b4, size_t* ix);
 static bool map_put3(struct map* m, const void* p, uint32_t b3);
 static bool map_put4(struct map* m, const void* p, uint32_t b4);
 static void map_remove(struct map* m, size_t ix);
-
-static const size_t map_deleted_ = 0xC001F00Du;
-static const void*  map_deleted  = &map_deleted_;
 
 static size_t map_prime_under(size_t n) {
     static const size_t table_of_primes[] = {
@@ -58,7 +67,7 @@ static inline size_t map_hash(struct map* m, uint32_t k) {
 }
 
 static void map_init(struct map* m, void** p, size_t n, size_t b) {
-    swear(16 < n && n <= (1u << 24) && 3 <= b && b <= 4);
+    swear(8 < n && n <= (1u << 24) && 3 <= b && b <= 4);
     memset(m, 0, sizeof(*m));
     m->p = p;
     m->n = map_prime_under(n);
@@ -66,38 +75,36 @@ static void map_init(struct map* m, void** p, size_t n, size_t b) {
     memset(m->p, 0, n * sizeof(m->p[0]));
 }
 
-static inline void map_reduce_chain(struct map* m, size_t i) {
-    assert(m->p[i] == map_deleted);
-    const size_t n = m->n;
-    size_t e = i + 1; // end of deleted chain
-    while (e < i + n && m->p[e % n] == map_deleted) { e++; }
-    if (!m->p[e % n]) {
-        for (size_t j = i; j < e; j++) { m->p[j % n] = 0; }
+static void map_print(struct map* m) {
+    trace("[");
+    for (size_t i = 0; i < m->n; i++) {
+        if (!m->p[i]) {
+            trace(" [%2zd] null\n", i);
+        } else {
+            const uint32_t b4 = *(uint32_t*)m->p[i];
+            size_t h = map_hash(m, b4 & m->m); // ideal position
+            trace(" [%2zd] 0x%08X h:%d\n", i, b4, h); (void)h;
+        }
     }
+    trace("] n:e %zd:%zd\n", m->n, m->e);
 }
 
-static inline bool map_get_hashed(struct map* m, uint32_t k,
-                                  size_t i, size_t* ix) {
+static inline bool map_get(struct map* m, uint32_t k,
+                                  const size_t s, size_t* ix) {
+    size_t i = s; // start
     const uint32_t mask = m->m;
-    bool reduced = false;
     #ifdef MAP_STATS
     m->q++;       // stats
     size_t c = 1; // stats: chain
     m->t++; // total
     #endif
     while (m->p[i]) {
-        const bool deleted = m->p[i] == map_deleted;
-        const bool not_deleted_and_equal = !deleted &&
-                   (mask & *((uint32_t*)m->p[i])) == k;
-        if (not_deleted_and_equal) {
+        if ((mask & *((uint32_t*)m->p[i])) == k) {
             *ix = i;
             return true;
         } else {
-            if (deleted && !reduced) {
-                map_reduce_chain(m, i);
-                reduced = true;
-            }
             i = (i + 1) % m->n;
+            if (i == s) { return false; }
             #ifdef MAP_STATS
             m->t++; // total
             if (++c > m->c) { m->c = c; }
@@ -107,29 +114,58 @@ static inline bool map_get_hashed(struct map* m, uint32_t k,
     return false;
 }
 
-static inline bool map_get3(struct map* m, uint32_t b3, size_t* ix) {
-    assert((b3 & ~0xFFFFFFu) == 0 && m->m == 0x00FFFFFFu);
-    return map_get_hashed(m, b3, map_hash(m, b3), ix);
-}
-
-static inline bool map_get4(struct map* m, uint32_t b4, size_t* ix) {
-    assert(m->m == 0xFFFFFFFFu);
-    return map_get_hashed(m, b4, map_hash(m, b4), ix);
-}
-
-static inline void map_remove(struct map* m, size_t ix) {
+static inline void map_remove(struct map* m, size_t i) {
     #ifdef MAP_STATS
     assert(m->e > 0);
     m->e--;
     #endif
-    m->p[ix] = m->p[(ix + 1) % m->n] ? map_deleted : 0;
-    if (m->p[ix]) { map_reduce_chain(m, ix); }
+    #ifdef MAP_VERBOSE
+        const uint32_t b4 = *(uint32_t*)m->p[i];
+        trace("[%2zd] removed  0x%08X h:%2zd entries %zd\n",
+               i, b4, map_hash(m, b4 & m->m), m->e);
+    #endif
+    m->p[i] = 0;
+    size_t x = i; // next
+    for (;;) {
+        x = (x + 1) % m->n;
+        if (!m->p[x]) { break; }
+        const uint32_t b4 = *(uint32_t*)m->p[x];
+        size_t h = map_hash(m, b4 & m->m);
+        // Check if `h` lies within [i, x), accounting for wrap-around:
+        if ((x < i) ^ (h <= i) ^ (h > x)) { // can move
+            m->p[i] = m->p[x];
+            m->p[x] = 0;
+            i = x;
+        }
+    }
 }
+
+/*
+
+   Case 1: No wrap-around, i < x and h lies between i and x
+   [__0__|__1__|__2__|__3__|__4__|__5__|__6__|__7__]
+                i:2         h:4         x:6
+   In this case, i < x and h is within the straightforward range [i, x).
+
+   Case 2: Wrap-around, x < i, and h lies before i
+   [__0__|__1__|__2__|__3__|__4__|__5__|__6__|__7__]
+          h:1   x:2                     i:6
+   Here, with x < i and h <= i, h falls in the wrapped-around portion
+   [i, n-1] + [0, x).
+
+   Case 3: Wrap-around, x < i, and h lies beyond x
+   [__0__|__1__|__2__|__3__|__4__|__5__|__6__|__7__]
+                x:2                     i:6   h:7
+   In this case, x < i and h > x, so h is in the range [i, n-1] + [0, x).
+
+   This combined condition (x < i) ^ (h <= i) ^ (h > x) with exclusive OR
+   clauses accurately identifies if h is in [i, x), regardless of wrap-around.
+
+*/
 
 static inline bool map_put(struct map* m, const void* p,
                       const size_t h, uint32_t k) {
     const uint32_t mask = m->m;
-    size_t d = (size_t)-1; // index of first deleted
     size_t i = h;
     #ifdef MAP_STATS
     m->q++;       // queries
@@ -137,39 +173,38 @@ static inline bool map_put(struct map* m, const void* p,
     m->t++;       // total
     #endif
     while (m->p[i]) {
-        const bool deleted = m->p[i] == map_deleted;
-        const bool not_deleted_and_equal = !deleted &&
-                   (mask & *((uint32_t*)m->p[i])) == k;
-        if (not_deleted_and_equal) {
+        if ((mask & *((uint32_t*)m->p[i])) == k) {
             #ifdef MAP_STATS
             m->r++; // replacing existing key
             #endif
             m->p[i] = p;
             return true;
         } else {
-            if (deleted && d == (size_t)-1) { d = i; }
             i = (i + 1) % m->n;
             #ifdef MAP_STATS
             m->t++;
             if (++c > m->c) { m->c = c; }
             #endif
-            assert(i != h); // in theory should not happen
-            if (i == h) { // overflow
-                if (d == (size_t)-1) { return false; }
-                break; // will put `p` into m->p[d]
-            }
+            assert(i != h); // in the way map is used should not happen
+            if (i == h) { return false; }
         }
-    }
-    if (d != (size_t)-1) {
-        map_reduce_chain(m, d);
-        m->p[d] = p;
-    } else {
-        m->p[i] = p;
     }
     #ifdef MAP_STATS
     m->e++;
     #endif
+    m->p[i] = p;
+    trace("[%2zd] inserted 0x%08X h:%2zd entries %zd\n", i, k, h, m->e);
     return true;
+}
+
+static inline bool map_get3(struct map* m, uint32_t b3, size_t* ix) {
+    assert((b3 & ~0xFFFFFFu) == 0 && m->m == 0x00FFFFFFu);
+    return map_get(m, b3, map_hash(m, b3), ix);
+}
+
+static inline bool map_get4(struct map* m, uint32_t b4, size_t* ix) {
+    assert(m->m == 0xFFFFFFFFu);
+    return map_get(m, b4, map_hash(m, b4), ix);
 }
 
 static inline bool map_put3(struct map* m, const void* p, uint32_t b3) {
@@ -208,8 +243,8 @@ static inline bool map_put4(struct map* m, const void* p, uint32_t b4) {
 
 // tests:
 
-#define MAP_LZ77_LOOKUP
 #undef  MAP_LZ77_LOOKUP
+#define MAP_LZ77_LOOKUP
 
 static void map_stats(const struct map* m) {
     #ifdef MAP_STATS
@@ -222,7 +257,7 @@ static void map_stats(const struct map* m) {
     #endif
 }
 
-static void sliding_window(struct map* m3, struct map* m4,
+static void sliding(struct map* m3, struct map* m4,
         uint8_t in[], size_t n, size_t window) {
     size_t c3 = 0; // count of 3 bytes sequences found in the window
     size_t c4 = 0;
@@ -234,14 +269,17 @@ static void sliding_window(struct map* m3, struct map* m4,
         uint32_t b2 = b3 & 0xFFFF; (void)b2; // TODO: will need later
         if (i >= window) {
             uint32_t w4 = *((uint32_t*)(in + i - window));
-            uint32_t w3 = w4 & 0xFFFFFF;
-            uint32_t w2 = w3 & 0xFFFF; (void)w2; // TODO: will need later
             size_t ix;
-            b = map_get3(m3, w3, &ix);
+            b = map_get3(m3, w4 & 0xFFFFFF, &ix);
             if (b && (uint8_t*)m3->p[ix] <= in + i - window) {
                 map_remove(m3, ix);
             }
             b = map_get4(m4, w4, &ix);
+            if (b) {
+                trace("[%2zd] found    0x%08X h:%2zd\n", ix, w4, map_hash(m4, w4));
+            } else {
+                trace("not  found    0x%08X h:%2zd\n", w4, map_hash(m4, w4));
+            }
             if (b && (uint8_t*)m4->p[ix] <= in + i - window) {
                 map_remove(m4, ix);
             }
@@ -268,7 +306,7 @@ static void sliding_window(struct map* m3, struct map* m4,
         if (!b) { map_stats(m4); }
         assert(b);
         #ifdef MAP_STATS
-        if (m4->e > window) { map_stats(m4); }
+        if (m4->e > window) { map_stats(m4); map_print(m4); }
         assert(m4->e <= window);
         #endif
     }
@@ -280,11 +318,8 @@ static void sliding_window(struct map* m3, struct map* m4,
 }
 
 static int test(void) {
-    enum { window = 1 << 16, e = window * 4 };
-    // number of entries in the map is 4 times
-    // the window size. Experimental window * 2
-    // leads to enormous amount of collisions
-    // with 16 bit rand() generated array of bytes
+    enum { window = 1 << 16, e = window * 2 };
+    // number of entries in the map is 2 times the window size.
     static uint8_t* p3[e];
     static uint8_t* p4[e];
     static struct map map3;
@@ -303,7 +338,7 @@ static int test(void) {
         }
         map_init(m3, p3, e, 3);
         map_init(m4, p4, e, 4);
-        sliding_window(m3, m4, in, countof(in), window);
+        sliding(m3, m4, in, countof(in), window);
     }
     {
         uint8_t* data = null;
@@ -313,7 +348,7 @@ static int test(void) {
         printf("bible.txt %zd\n", bytes);
         map_init(m3, p3, e, 3);
         map_init(m4, p4, e, 4);
-        sliding_window(m3, m4, data, bytes, window);
+        sliding(m3, m4, data, bytes, window);
         free(data);
     }
     {
@@ -324,7 +359,7 @@ static int test(void) {
         printf("mandrill.png %zd\n", bytes);
         map_init(m3, p3, e, 3);
         map_init(m4, p4, e, 4);
-        sliding_window(m3, m4, data, bytes, window);
+        sliding(m3, m4, data, bytes, window);
         free(data);
     }
     return 0;
