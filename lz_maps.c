@@ -21,21 +21,13 @@
 
 enum { min_window = 4, max_window = 1u << 16, min_len = 2, max_len = 254 };
 
-struct map { // single threaded use only
+struct map {
     const void** p; // p[n]
     size_t       n; // number of entries in the map (max_window * 4)
     uint32_t     m; // mask 0xFFFFFF for 3 bytes and 0xFFFFFFFFu for 4 bytes
 };
 
 struct lz {
-    const uint8_t* in; // pointer to array of bytes[n]
-    size_t   n;        // number of bytes in `in` array
-    size_t   i;        // current position in `in` array after window
-    size_t   w;        // window size
-    // TODO: all the fields above is debugging convenience
-    //       and can be passed as parameters to all the lz_* functions
-    //       possibly assisting compiler to optimize better and use
-    //       registers instead of writing values back to memory.
     size_t   prev[max_window]; // previous `i` of 4 bytes entry
     size_t   map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes
     struct map map3;
@@ -45,240 +37,17 @@ struct lz {
     void* map4e[max_window + max_window / 2];
 };
 
-static void map_init(struct map* m, void** p, size_t n, size_t b);
-static bool map_get3(struct map* m, uint32_t b3, size_t* ix);
-static bool map_get4(struct map* m, uint32_t b4, size_t* ix);
-static bool map_put3(struct map* m, const void* p, uint32_t b3);
-static bool map_put4(struct map* m, const void* p, uint32_t b4);
-static void map_remove(struct map* m, size_t ix);
-
-static void lz_init(struct lz *lz, const uint8_t* in, size_t n, size_t window) {
-    assert(n > 0);
-    assert(min_window <= window && window <= max_window);
-    assert(((window - 1) & window) == 0); // window is power of 2
-    memset(lz, 0, sizeof(*lz));
-    lz->in = in;
-    lz->n  = n;
-    lz->i  = 0;
-    lz->w  = window;
-    map_init(&lz->map3, lz->map3e, sizeof(lz->map3e) / sizeof(lz->map3e[0]), 3);
-    map_init(&lz->map4, lz->map4e, sizeof(lz->map4e) / sizeof(lz->map4e[0]), 4);
+static void map_init(struct map* m, void** p, size_t n, size_t b) {
+    assert(16 < n && n <= (1u << 24) && 3 <= b && b <= 4);
+    if ( !(16 < n && n <= (1u << 24) && 3 <= b && b <= 4) ) {
+        exit(1); // this is not a generic map implementation
+    }
+    memset(m, 0, sizeof(*m));
+    m->p = p;
+    m->n = n;
+    m->m = b == 3 ? 0x00FFFFFFu : 0xFFFFFFFFu;
+    memset(m->p, 0, n * sizeof(m->p[0]));
 }
-
-static void lz_chain(struct lz *lz, size_t index) {
-    const uint8_t* in = lz->in;
-    const size_t i = lz->i;
-    const size_t w = lz->w;
-    printf("[%zd] \"%c%c\" index(i mod %zd)=%zu ", i, in[i], in[i + 1], w, index);
-    size_t p = i;
-    size_t d = lz->prev[index];
-    while (d > 0 && d <= p && p - d < i && i <= p - d + w) {
-        p -= d;
-        printf(" \"%c%c\" %zu", in[p], in[p + 1], p);
-        d = lz->prev[p % w];
-    }
-    printf("\n");
-}
-
-static void lz_verify(struct lz *lz, size_t index) {
-    const uint8_t* in = lz->in; (void)in;
-    const size_t i = lz->i;
-    const size_t w = lz->w;
-    size_t p = i;
-    size_t d = lz->prev[index];
-    while (d > 0 && d <= p && p - d < i && i <= p - d + w) {
-        p -= d;
-        assert(p != i && memcmp(in + p, in + i, 4) == 0);
-        d = lz->prev[p % w];
-    }
-}
-
-static void lz_insert(struct lz* lz) {
-    const uint8_t* in = lz->in;
-    const size_t n = lz->n;
-    const size_t i = lz->i;
-    const size_t w = lz->w;
-    if (i < n - 4) {
-        bool b;
-        if (i >= w) {
-            uint32_t w4 = *((uint32_t*)(in + i - w));
-            uint32_t w3 = w4 & 0xFFFFFF;
-            size_t ix;
-            b = map_get3(&lz->map3, w3, &ix);
-            // TODO: ??? <= or < ???
-            if (b && (uint8_t*)lz->map3.p[ix] <= in + i - w) {
-                map_remove(&lz->map3, ix);
-            }
-            b = map_get4(&lz->map4, w4, &ix);
-            if (b && (uint8_t*)lz->map4.p[ix] <= in + i - w) {
-                map_remove(&lz->map4, ix);
-            }
-        }
-        uint32_t b4 = *((uint32_t*)(in + i));
-        uint32_t b3 = b4 & 0xFFFFFF;
-        uint32_t b2 = b3 & 0xFFFF; (void)b2; // TODO: will need later
-        b = map_put3(&lz->map3, in + i, b3);
-        assert(b);
-        size_t pp = 0; // previous position of 4 bytes entry
-        size_t ix;
-        bool seen = map_get4(&lz->map4, b4, &ix);
-        if (!seen) {
-            b = map_put4(&lz->map4, in + i, b4);
-            assert(b);
-        } else {
-            pp = (const uint8_t*)lz->map4.p[ix] - in;
-            lz->map4.p[ix] = in + i;
-        }
-        const size_t index = i % lz->w;
-        trace("[%zd] map[\"%c%c\":0x%04x(%u)] = %zu prev[%zd] := ",
-               i, in[i], in[i + 1], b2, b2, pp, index);
-        if (!seen) {
-            trace("0\n");
-            lz->prev[index] = 0;
-        } else {
-            assert(pp != i); // cannot be the same!
-            // `i`, `pp` and `w` are unsigned,
-            // if `i` may is less than `w` pp <= i - w is incorrect
-            if (i <= w || i - w <= pp && pp < i) {
-                assert(pp != i); // guarantees i - p != 0
-                assert(memcmp(in + pp, in + i, 4) == 0);
-                trace("%zu\n", i - pp);
-                lz->prev[index] = i - pp;
-            } else {
-                trace("(out of window)\n");
-                lz->prev[index] = 0;
-            }
-        }
-        lz->map2[b2] = i + 1;
-        trace("[%zd] map2[\"%c%c\":0x%04x(%u)] := %zu\n",
-               i, in[i], in[i + 1], b2, b2, index + 1);
-        #ifdef LZ_VERBOSE
-            lz_chain(lz, index);
-        #endif
-        #ifdef DEBUG
-            lz_verify(lz, index);
-        #endif
-    }
-}
-
-// both lz_find and lz_linear function search longest match
-// at a shortest distance from position `i` and return
-// ml: [2..max_len] inclusive
-// md: [1..window] inclusive
-
-static inline void lz_find(struct lz* lz, size_t *ml, size_t *md) {
-    const uint8_t* in = lz->in;
-    const size_t i = lz->i;
-    const size_t n = lz->n;
-    const size_t w = lz->w;
-    const uint32_t b4 = *((uint32_t*)(in + i));
-    size_t len = 0;
-    size_t dst = 0;
-    size_t p;
-    size_t ix;
-//  if (i == 31 && w == 8) { rt_breakpoint(); }
-
-    // TODO: search for longer sequence (RLE) can be done
-    //       onle after map4/map3/map2?
-
-    bool b = map_get4(&lz->map4, b4, &ix);
-    if (b) {
-        p = (const uint8_t*)lz->map4.p[ix] - in;
-assert(memcmp(lz->map4.p[ix], &b4, 4) == 0);
-assert(memcmp(lz->map4.p[ix], in + i, 4) == 0);
-assert(memcmp(in + p, in + i, 4) == 0);
-        size_t max_k = n - i > max_len ? max_len : n - i;
-        size_t k = 4; // start with at least 4
-        while (k < max_k && in[p + k] == in[i + k]) { k++; }
-        if (i - p <= w) { len = k; dst = i - p; }
-        size_t index = p & (w - 1); // same as p % w for w = 2^x
-        size_t d = lz->prev[index];
-        while (len < max_len && 0 < d && d <= p && p - d < i && i <= p - d + w) {
-            p -= d;
-assert(memcmp(in + p, in + i, 4) == 0);
-            if (len == 4 || memcmp(in + p + 4, in + i + 4, len - 4) == 0) {
-                k = len; // because with `len` bytes are the same
-                while (k < max_k && in[p + k] == in[i + k]) { k++; }
-                if (k > len) { len = k; dst = i - p; }
-            }
-            index = p & (w - 1); // same as p % w for w = 2^x
-            d = lz->prev[index];
-        }
-    }
-    // for window == 2 consider sample below:
-    // "a_aa_aa_aa" window = 2
-    //  0123456789
-    //  at in[i:3] len: 7 dst: 3
-    // when map4[] and map3[] do not hold anything yet (w:2)
-    //
-    // but for window >= 4 the failure to find 4 or longer match
-    // means 3 and 2 bytes match do not need extension
-    if (len == 0) {
-        b = map_get3(&lz->map3, b4 & 0xFFFFFF, &ix);
-        if (b) {
-            p = (const uint8_t*)lz->map3.p[ix] - in;
-assert(memcmp(lz->map3.p[ix], &b4, 3) == 0);
-assert(memcmp(lz->map3.p[ix], in + i, 3) == 0);
-assert(memcmp(in + p, in + i, 3) == 0);
-            // the map4[] may now be found because it does not
-            // take into account RLE overlapped sequences
-            size_t max_k = n - i > max_len ? max_len : n - i;
-            size_t k = 3; // start with at least 3
-            while (k < max_k && in[p + k] == in[i + k]) { k++; }
-assert(k == 3); // because min_window == 4 and we already searched for 4 bytes
-            if (i - p <= w) { len = k; dst = i - p; }
-        }
-    }
-    if (len == 0) {
-        p = lz->map2[b4 & 0xFFFF];
-        if (p > 0) {
-            p--; // because map2[] keep position + 1
-assert(memcmp(in + p, in + i, 2) == 0);
-            // the map3[] and map4[] may now be found because
-            // take into account RLE overlapped sequences
-            size_t max_k = n - i > max_len ? max_len : n - i;
-            size_t k = 2; // start with at least 2
-            while (k < max_k && in[p + k] == in[i + k]) { k++; }
-assert(k == 2); // because min_window == 4 and we already searched for 4 bytes
-            if (i - p <= w) { len = k; dst = i - p; }
-        }
-    }
-    if (len > 0) {
-        *ml = len;
-        *md = dst;
-    }
-}
-
-static void lz_linear(struct lz* lz, size_t *ml, size_t *md) {
-    assert(*ml == 0);
-    assert(*md == 0);
-    const size_t n = lz->n;
-    const size_t i = lz->i;
-    const size_t w = lz->w;
-    if (1 <= i && i < n - 4) {
-        size_t len = 0;
-        size_t dst = 0;
-        const uint8_t* in = lz->in;
-        size_t j = i - 1;
-        size_t min_j = i >= w ? i - w : 0;
-        for (;;) {
-            size_t max_k = n - i > max_len ? max_len : n - i;
-            size_t k = 0;
-            while (k < max_k && in[j + k] == in[i + k]) { k++; }
-            if (k >= 2 && k > len) {
-                len = k;
-                dst = i - j;
-                if (len == max_len) { break; }
-            }
-            if (j == min_j) { break; }
-            j--;
-        }
-        *ml = len;
-        *md = dst;
-    }
-}
-
-// maps
 
 static inline uint32_t map_hash_key(uint32_t k) {
     k ^= k >> 13; // Bob Jenkins' hash
@@ -289,18 +58,6 @@ static inline uint32_t map_hash_key(uint32_t k) {
 
 static inline size_t map_hash(struct map* m, uint32_t k) {
     return (size_t)(map_hash_key(k) % m->n);
-}
-
-static void map_init(struct map* m, uint8_t** p, size_t n, size_t b) {
-    assert(16 < n && n <= (1u << 24) && 3 <= b && b <= 4);
-    if (!(16 < n && n <= (1u << 24) && 3 <= b && b <= 4)) {
-        exit(1); // this is not generic map implementation
-    }
-    memset(m, 0, sizeof(*m));
-    m->p = p;
-    m->n = n;
-    m->m = b == 3 ? 0x00FFFFFFu : 0xFFFFFFFFu;
-    memset(m->p, 0, n * sizeof(m->p[0]));
 }
 
 static inline bool map_get(struct map* m, uint32_t k,
@@ -335,29 +92,6 @@ static inline void map_remove(struct map* m, size_t i) {
         }
     }
 }
-
-/*
-
-   Case 1: No wrap-around, i < x and h lies between i and x
-   [__0__|__1__|__2__|__3__|__4__|__5__|__6__|__7__]
-                i:2         h:4         x:6
-   In this case, i < x and h is within the straightforward range [i, x).
-
-   Case 2: Wrap-around, x < i, and h lies before i
-   [__0__|__1__|__2__|__3__|__4__|__5__|__6__|__7__]
-          h:1   x:2                     i:6
-   Here, with x < i and h <= i, h falls in the wrapped-around portion
-   [i, n-1] + [0, x).
-
-   Case 3: Wrap-around, x < i, and h lies beyond x
-   [__0__|__1__|__2__|__3__|__4__|__5__|__6__|__7__]
-                x:2                     i:6   h:7
-   In this case, x < i and h > x, so h is in the range [i, n-1] + [0, x).
-
-   This combined condition (x < i) ^ (h <= i) ^ (h > x) with exclusive OR
-   clauses accurately identifies if h is in [i, x), regardless of wrap-around.
-
-*/
 
 static inline bool map_put(struct map* m, const void* p,
                       const size_t h, uint32_t k) {
@@ -397,14 +131,153 @@ static inline bool map_get4(struct map* m, uint32_t b4, size_t* ix) {
     return map_get(m, b4, map_hash(m, b4), ix);
 }
 
+
+static void lz_init(struct lz *lz) {
+    memset(lz->prev, 0, sizeof(lz->prev));
+    memset(lz->map2, 0, sizeof(lz->map2));
+    map_init(&lz->map3, lz->map3e, sizeof(lz->map3e) / sizeof(lz->map3e[0]), 3);
+    map_init(&lz->map4, lz->map4e, sizeof(lz->map4e) / sizeof(lz->map4e[0]), 4);
+}
+
+static void lz_insert(struct lz* lz, const uint8_t* in, const size_t n,
+                      const size_t w, const size_t i) {
+    assert(min_window <= w && w <= max_window);
+    assert(((w - 1) & w) == 0); // window is power of 2
+    if (i < n - 4) {
+        bool b;
+        if (i >= w) {
+            uint32_t w4 = *((uint32_t*)(in + i - w));
+            size_t ix;
+            b = map_get3(&lz->map3, w4 & 0xFFFFFF, &ix);
+            if (b && (uint8_t*)lz->map3.p[ix] <= in + i - w) {
+                map_remove(&lz->map3, ix);
+            }
+            b = map_get4(&lz->map4, w4, &ix);
+            if (b && (uint8_t*)lz->map4.p[ix] <= in + i - w) {
+                map_remove(&lz->map4, ix);
+            }
+        }
+        uint32_t b4 = *((uint32_t*)(in + i));
+        b = map_put3(&lz->map3, in + i, b4 & 0x00FFFFFFu);
+        assert(b);
+        size_t pp = 0; // previous position of 4 bytes entry
+        size_t ix;
+        bool seen = map_get4(&lz->map4, b4, &ix);
+        if (!seen) {
+            b = map_put4(&lz->map4, in + i, b4);
+            assert(b);
+        } else {
+            pp = (const uint8_t*)lz->map4.p[ix] - in;
+            lz->map4.p[ix] = in + i;
+        }
+        const size_t index = i % w;
+        if (!seen) {
+            lz->prev[index] = 0;
+        } else {
+            // `i`, `pp` and `w` are unsigned,
+            // if `i` may is less than `w` pp <= i - w is incorrect
+            if (i <= w || i - w <= pp && pp < i) {
+                lz->prev[index] = i - pp;
+            } else {
+                lz->prev[index] = 0;
+            }
+        }
+        lz->map2[ b4 & 0xFFFFu] = i + 1;
+    }
+}
+
+// both lz_find and lz_linear function search longest match
+// at a shortest distance from position `i` and return
+// ml: [2..max_len] inclusive
+// md: [1..window] inclusive
+
+static inline void lz_find(struct lz* lz, const uint8_t* in, const size_t n,
+                           const size_t w, const size_t i,
+                           size_t *ml, size_t *md) {
+    assert(min_window <= w && w <= max_window);
+    assert(((w - 1) & w) == 0); // window is power of 2
+    assert(*ml == 0); // caller's responsibility
+    assert(*md == 0);
+    size_t len = 0;
+    size_t dst = 0;
+    const uint32_t b4 = *((uint32_t*)(in + i));
+    size_t p;
+    size_t ix;
+    bool b = map_get4(&lz->map4, b4, &ix);
+    if (b) {
+        p = (const uint8_t*)lz->map4.p[ix] - in;
+        size_t max_k = n - i > max_len ? max_len : n - i;
+        size_t k = 4; // start with at least 4
+        while (k < max_k && in[p + k] == in[i + k]) { k++; }
+        if (i - p <= w) { len = k; dst = i - p; }
+        size_t index = p & (w - 1); // same as p % w for w = 2^x
+        size_t d = lz->prev[index];
+        while (len < max_len && 0 < d && d <= p && p - d < i && i <= p - d + w) {
+            p -= d;
+            if (len == 4 || memcmp(in + p + 4, in + i + 4, len - 4) == 0) {
+                k = len; // because with `len` bytes are the same
+                while (k < max_k && in[p + k] == in[i + k]) { k++; }
+                if (k > len) { len = k; dst = i - p; }
+            }
+            index = p & (w - 1); // same as p % w for w = 2^x
+            d = lz->prev[index];
+        }
+    }
+    if (len == 0) {
+        b = map_get3(&lz->map3, b4 & 0xFFFFFF, &ix);
+        if (b) {
+            p = (const uint8_t*)lz->map3.p[ix] - in;
+            if (i - p <= w) { len = 3; dst = i - p; }
+        }
+    }
+    if (len == 0) {
+        p = lz->map2[b4 & 0xFFFF];
+        if (p > 0) {
+            p--; // because map2[] keep position + 1
+            if (i - p <= w) { len = 2; dst = i - p; }
+        }
+    }
+    if (len > 0) {
+        *ml = len;
+        *md = dst;
+    }
+}
+
+static void lz_linear(const uint8_t* in, const size_t n,
+                      const size_t w, const size_t i,
+                      size_t *ml, size_t *md) {
+    assert(*ml == 0); // caller's responsibility
+    assert(*md == 0);
+    if (1 <= i && i < n - 4) {
+        size_t len = 0;
+        size_t dst = 0;
+        size_t j = i - 1;
+        size_t min_j = i >= w ? i - w : 0;
+        for (;;) {
+            size_t max_k = n - i > max_len ? max_len : n - i;
+            size_t k = 0;
+            while (k < max_k && in[j + k] == in[i + k]) { k++; }
+            if (k >= 2 && k > len) {
+                len = k;
+                dst = i - j;
+                if (len == max_len) { break; }
+            }
+            if (j == min_j) { break; }
+            j--;
+        }
+        *ml = len;
+        *md = dst;
+    }
+}
+
 // tests:
 
 static uint64_t seed = 1; // random generator seed/state
 
 static int test(struct lz* lz, const uint8_t* in, const size_t n,
                 const size_t w, bool verbose) {
-    assert(w <= max_window);
-    lz_init(lz, in, n, w);
+    assert(min_window <= w && w <= max_window);
+    lz_init(lz);
     #ifdef DEBUG
     if (verbose) {
         printf("\"%.*s\": %zu\n ", (int)n, in, n);
@@ -420,46 +293,50 @@ static int test(struct lz* lz, const uint8_t* in, const size_t n,
     #else
     (void)verbose;
     #endif
-    lz->i = 0;
-    lz_insert(lz);
-    while (lz->i < lz->n) {
-        if (1 <= lz->i && lz->i < lz->n - 4) {
+    size_t i = 0;
+    lz_insert(lz, in, n, w, i);
+    while (i < n) {
+        if (1 <= i && i < n - 4) {
             size_t ml1 = 0, md1 = 0;
-            lz_find(lz, &ml1, &md1);
+            lz_find(lz, in, n, w, i, &ml1, &md1);
             #ifdef DEBUG
                 // TODO: this is incredibly slow
                 //       need an option (compile or runtime)
                 //       to turn it on/off
                 size_t ml2 = 0, md2 = 0;
-                lz_linear(lz, &ml2, &md2);
+                lz_linear(in, n, w, i, &ml2, &md2);
                 if (ml1 > 0 || ml2 > 0) {
                     if (ml1 != ml2 || md1 != md2) {
                         printf("[%zd] longest len:dst %3zd:%zd \"%.2s\" \n",
-                               lz->i, ml1, md1, lz->in + lz->i);
+                               i, ml1, md1, in + i);
                         printf("[%zd] linear  len:dst %3zd:%zd \"%.2s\" \n",
-                               lz->i, ml2, md2, lz->in + lz->i);
+                               i, ml2, md2, in + i);
                     }
                     assert(ml1 == ml2 && md1 == md2);
                     if (ml1 != ml2 || md1 != md2) { return 1; }
-                    size_t next_i = lz->i + ml1;
-                    while (lz->i < next_i) { lz_insert(lz); lz->i++; }
+                    size_t next_i = i + ml1;
+                    while (i < next_i) {
+                        lz_insert(lz, in, n, w, i);
+                        i++;
+                    }
                 } else {
-                    lz_insert(lz); lz->i++;
+                    lz_insert(lz, in, n, w, i);
+                    i++;
                 }
             #else
                 if (ml1 > 0) {
-                    size_t next_i = lz->i + ml1;
-                    while (lz->i < next_i) {
-                        lz_insert(lz);
-                        lz->i++;
+                    size_t next_i = i + ml1;
+                    while (i < next_i) {
+                        lz_insert(lz, in, n, w, i);
+                        i++;
                     }
                 } else {
-                    lz_insert(lz);
-                    lz->i++;
+                    lz_insert(lz, in, n, w, i);
+                    i++;
                 }
             #endif
         } else {
-            lz->i++;
+            i++;
         }
     }
     return 0;
