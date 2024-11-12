@@ -152,8 +152,12 @@ static void lz_insert(struct lz* lz, const uint8_t* in, const size_t n,
     if (i < n - 4) {
         bool b;
         if (i >= w) {
-            uint32_t w4 = *((uint32_t*)(in + i - w));
+            #ifdef LZ_CHECK_INCOMING_AND_LEAVING
+            const uint32_t w4 = *((uint32_t*)(in + i - w));
             swear(w4 == leaving);
+            #else
+            const uint32_t w4 = leaving;
+            #endif
             size_t ix;
             b = map_get3(&lz->map3, w4 & 0xFFFFFF, &ix);
             if (b && (uint8_t*)lz->map3.p[ix] <= in + i - w) {
@@ -164,8 +168,12 @@ static void lz_insert(struct lz* lz, const uint8_t* in, const size_t n,
                 map_remove(&lz->map4, ix);
             }
         }
-        uint32_t b4 = *((uint32_t*)(in + i));
+        #ifdef LZ_CHECK_INCOMING_AND_LEAVING
+        const uint32_t b4 = *((uint32_t*)(in + i));
         swear(b4 == incoming);
+        #else
+        const uint32_t b4 = incoming;
+        #endif
         b = map_put3(&lz->map3, in + i, b4 & 0x00FFFFFFu);
         assert(b);
         size_t pp = 0; // previous position of 4 bytes entry
@@ -201,7 +209,7 @@ static void lz_insert(struct lz* lz, const uint8_t* in, const size_t n,
 
 static inline void lz_find(struct lz* lz, const uint8_t* in, const size_t n,
                            const size_t w, const size_t i,
-                           uint32_t leaving,
+                           uint32_t incoming,
                            size_t *ml, size_t *md) {
     assert(min_window <= w && w <= max_window);
     assert(((w - 1) & w) == 0); // window is power of 2
@@ -209,8 +217,12 @@ static inline void lz_find(struct lz* lz, const uint8_t* in, const size_t n,
     assert(*md == 0);
     size_t len = 0;
     size_t dst = 0;
+    #ifdef LZ_CHECK_INCOMING_AND_LEAVING
     const uint32_t b4 = *((uint32_t*)(in + i));
-    swear(b4 == leaving);
+    swear(b4 == incoming);
+    #else
+    const uint32_t b4 = incoming;
+    #endif
     size_t p;
     size_t ix;
     bool b = map_get4(&lz->map4, b4, &ix);
@@ -286,17 +298,36 @@ static void lz_linear(const uint8_t* in, const size_t n,
 
 // tests:
 
-static int test(struct lz* lz, const uint8_t* in, const size_t n,
-                const size_t w, bool verbose) {
-    assert(n >= 4);
-    assert(min_window <= w && w <= max_window);
-    lz_init(lz);
-    #ifdef DEBUG
-    if (verbose) {
-        printf("\"%.*s\": %zu\n ", (int)n, in, n);
-        for (size_t i = 0; i < n; i++) {
-            printf("%d", i % 10);
+static bool is_ascii(const uint8_t* s, const size_t n) {
+    bool ascii = true;
+    for (size_t i = 0; i < n && ascii; i++) {
+        ascii = 0x20 <= s[i] && s[i] <= 0x7F;
+    }
+    return ascii;
+}
+
+static void print_ascii_or_hex(const uint8_t* s, const size_t n) {
+    if (is_ascii(s, n)) {
+        size_t mn = min(n, 32);
+        if (mn == n) {
+            printf("\"%.*s\"", (int)mn, s);
+        } else {
+            printf("\"%.*s...\"", (int)mn, s);
         }
+    } else {
+        printf("0x");
+        size_t mn = min(n, 16);
+        for (size_t i = 0; i < mn; i++) { printf("%02X", s[i]); }
+        if (mn != n) { printf("..."); }
+    }
+    printf("\n");
+}
+
+static inline void debug_dump_input(const uint8_t* in, size_t n, bool verbose) {
+    #ifdef DEBUG
+    if (verbose && is_ascii(in, n)) {
+        printf("\"%.*s\": %zu\n ", (int)n, in, n);
+        for (size_t i = 0; i < n; i++) { printf("%d", i % 10); }
         printf("\n ");
         for (size_t i = 0; i < n; i++) {
             printf("%c", i % 10 == 0 ? '0' + (i / 10) % 10 : 0x20);
@@ -304,89 +335,81 @@ static int test(struct lz* lz, const uint8_t* in, const size_t n,
         printf("\n");
     }
     #else
-    (void)verbose;
+    (void)in; (void)n; (void)verbose;
     #endif
+}
+
+static inline int debug_check_match(const uint8_t* in, size_t n, size_t w,
+                                    size_t i, size_t ml1, size_t md1) {
+    #ifdef DEBUG
+    size_t ml2 = 0;
+    size_t md2 = 0;
+    lz_linear(in, n, w, i, &ml2, &md2);
+    if (ml1 != ml2 || md1 != md2) {
+        printf("[%zd] longest len:dst %3zd:%-5zd ", i, ml1, md1);
+        print_ascii_or_hex(in + i, ml1);
+        printf("\n");
+        printf("[%zd] linear  len:dst %3zd:%-5zd ", i, ml2, md2);
+        print_ascii_or_hex(in + i, ml2);
+        printf("\n");
+        assert(ml1 == ml2 && md1 == md2);
+    }
+    return ml1 != ml2 || md1 != md2;
+    #else
+    (void)in; (void)n; (void)w; (void)i; (void)ml1; (void)md1;
+    return 0;
+    #endif
+}
+
+#define update_incoming_leaving(incoming, leaving, in, i, w) do {           \
+    incoming = (incoming >> 8) | (((uint32_t)in[(i) + 3]) << 24);           \
+    if (i > w) {                                                            \
+        leaving  = (leaving  >> 8) | (((uint32_t)in[(i) - (w) + 3]) << 24); \
+    }                                                                       \
+} while (0)
+
+#define insert_next(ml1, update) do {                           \
+    size_t next_i = i + ((ml1) > 0 ? (ml1) : 1);                \
+    while (i < next_i) {                                        \
+        lz_insert(lz, in, n, w, i, incoming, leaving);          \
+        i++;                                                    \
+        update_incoming_leaving(incoming, leaving, in, i, w);   \
+    }                                                           \
+} while (0)
+
+static int test(struct lz* lz, const uint8_t* in, const size_t n,
+                const size_t w, uint64_t *no_match, bool verbose) {
+    assert(n >= 4);
+    assert(min_window <= w && w <= max_window);
+    lz_init(lz);
+    debug_dump_input(in, n, verbose);
     uint32_t incoming = *(uint32_t*)in;
-    uint32_t leaving  = incoming;
-    size_t i = 0;
-    // TODO: accumulate incoming 4 bytes in a register (shifting and pass to find and insert)
-    //       so they do not need to be read from odd locations
-    while (i < n - 4) {
-        if (1 <= i && i < n - 4) {
-            size_t ml1 = 0, md1 = 0;
-            lz_find(lz, in, n, w, i, incoming, &ml1, &md1);
-            #ifdef DEBUG
-                // TODO: this is incredibly slow
-                //       need an option (compile or runtime)
-                //       to turn it on/off
-                size_t ml2 = 0, md2 = 0;
-                lz_linear(in, n, w, i, &ml2, &md2);
-                if (ml1 > 0 || ml2 > 0) {
-                    if (ml1 != ml2 || md1 != md2) {
-                        printf("[%zd] longest len:dst %3zd:%zd \"%.2s\" \n",
-                               i, ml1, md1, in + i);
-                        printf("[%zd] linear  len:dst %3zd:%zd \"%.2s\" \n",
-                               i, ml2, md2, in + i);
-                    }
-                    assert(ml1 == ml2 && md1 == md2);
-                    if (ml1 != ml2 || md1 != md2) { return 1; }
-                    size_t next_i = i + ml1;
-                    while (i < next_i) {
-                        lz_insert(lz, in, n, w, i, incoming, leaving);
-                        i++;
-                        incoming = (incoming >> 8) | (((uint32_t)in[i + 3]) << 24);
-                        if (i > w - 4) {
-                            leaving = (leaving >> 8) | (((uint32_t)in[i - w + 3]) << 24);
-                        }
-                    }
-                } else {
-                    lz_insert(lz, in, n, w, i, incoming, leaving);
-                    i++;
-                    incoming = (incoming >> 8) | (((uint32_t)in[i + 3]) << 24);
-                    if (i > w - 4) {
-                        leaving = (leaving >> 8) | (((uint32_t)in[i - w + 3]) << 24);
-                    }
-                }
-            #else
-                if (ml1 > 0) {
-                    size_t next_i = i + ml1;
-                    while (i < next_i) {
-                        lz_insert(lz, in, n, w, i, incoming, leaving);
-                        i++;
-                        incoming = (incoming >> 8) | (((uint32_t)in[i + 3]) << 24);
-                        if (i > w - 4) {
-                            leaving = (leaving >> 8) | (((uint32_t)in[i - w + 3]) << 24);
-                        }
-                    }
-                } else {
-                    lz_insert(lz, in, n, w, i, incoming, leaving);
-                    i++;
-                    incoming = (incoming >> 8) | (((uint32_t)in[i + 3]) << 24);
-                    if (i > w - 4) {
-                        leaving = (leaving >> 8) | (((uint32_t)in[i - w + 3]) << 24);
-                    }
-                }
-            #endif
-        } else {
-            lz_insert(lz, in, n, w, i, incoming, leaving);
-            i++;
-            incoming = (incoming >> 8) | (((uint32_t)in[i + 3]) << 24);
-            if (i > w - 4) {
-                leaving = (leaving >> 8) | (((uint32_t)in[i - w + 3]) << 24);
-            }
-        }
+    uint32_t leaving = incoming;
+    lz_insert(lz, in, n, w, 0, incoming, leaving);
+    size_t i = 1;
+    update_incoming_leaving(incoming, leaving, in, 1, w);
+    const size_t n4 = n - 4;
+    while (i < n4) {
+        size_t ml1 = 0, md1 = 0;
+        lz_find(lz, in, n, w, i, incoming, &ml1, &md1);
+        if (ml1 == 0) { (*no_match)++; }
+        if (debug_check_match(in, n, w, i, ml1, md1)) { return 1; }
+//      printf("[%2zd] incoming: %.4s 0x%08X leaving: %.4s 0x%08X\n",
+//             i, &incoming, incoming, &leaving, leaving);
+        insert_next(ml1, update_incoming_leaving);
+//      printf("[%2zd] incoming: %.4s 0x%08X leaving: %.4s 0x%08X\n",
+//             i, &incoming, incoming, &leaving, leaving);
     }
     return 0;
 }
-
-static uint64_t seed = 1; // random generator seed/state
 
 static int test0(struct lz* lz) {
     const char* in = "_abc;abd:abe_";
     const size_t n = strlen(in);
     const size_t w = 8;
     printf("n: %6zd window: %5zd\n", n, w);
-    return test(lz, (const uint8_t*)in, n, w, true);
+    uint64_t no_match = 0;
+    return test(lz, (const uint8_t*)in, n, w, &no_match, true);
 }
 
 static int test1(struct lz* lz) {
@@ -394,7 +417,8 @@ static int test1(struct lz* lz) {
     const size_t n = strlen(in);
     const size_t w = min_window;
     printf("n: %6zd window: %5zd\n", n, w);
-    return test(lz, (const uint8_t*)in, n, w, true);
+    uint64_t no_match = 0;
+    return test(lz, (const uint8_t*)in, n, w, &no_match, true);
 }
 
 static int test2(struct lz* lz) {
@@ -403,15 +427,19 @@ static int test2(struct lz* lz) {
     size_t max_w = n < max_window ? n : max_window;
     for (size_t w = min_window; w < max_w; w += w) {
         printf("n: %6zd window: %5zd\n", n, w);
-        if (test(lz, (const uint8_t*)in, n, w, true)) { return 1; }
+        uint64_t no_match = 0;
+        if (test(lz, (const uint8_t*)in, n, w, &no_match, true)) { return 1; }
     }
     return 0;
 }
 
+static uint64_t seed = 1; // random generator seed/state
+
 static int test3(struct lz* lz) {
-//  enum { N = 16, M = 256 * 1024, T = 1 }; // experimental
-    enum { N = 16, M = 256, T = 32 };
-    int pl[N] = { 0 };
+    enum { N = 16, M = 256 * 1024, T = 1 }; // experimental
+//  enum { N = 16, M = 256, T = 32 };
+    printf("random \"aaa_aa_aaaa...\" patterns\n");
+    static int pl[N] = { 0 };
     for (int t = 0; t < T; t++) {
         for (int i = 0; i < 16; i++) {
             pl[i] = 2 + (int)(rand64(&seed) * 2);
@@ -431,7 +459,8 @@ static int test3(struct lz* lz) {
         size_t max_w = n < max_window ? n : max_window;
         for (size_t w = min_window; w < max_w; w += w) {
             trace("n: %6zd window: %5zd\n", n, w);
-            if (test(lz, (const uint8_t*)in, n, w, false)) { return 1; }
+            uint64_t no_match = 0;
+            if (test(lz, (const uint8_t*)in, n, w, &no_match, false)) { return 1; }
         }
     }
     return 0;
@@ -446,14 +475,18 @@ static int test4(struct lz* lz) {
     #endif
     static uint8_t in[n];
     memset(in, 0x00, n);
+    printf("all 0x00 bytes\n");
     printf("n: %6d window: %5d\n", n, w);
+    uint64_t no_match = 0;
     uint64_t t = nanoseconds();
-    int r = test(lz, in, n, w, false);
+    int r = test(lz, in, n, w, &no_match, false);
     t = nanoseconds() - t;
     printf("Time: %6.3fs Throughput: %7.3f MiB/s ",
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
+    double as_is = 100.0 * (double)no_match / (double)n;
     double prev_per_byte = (double)lz->prev_count / (double)n;
-    printf("prev[] per byte: %7.3f max: %zd\n", prev_per_byte, lz->prev_max);
+    printf("prev[] per byte: %7.3f max: %zd as is: %.1f%%\n",
+            prev_per_byte, lz->prev_max, as_is);
     // 32MB on Mac Book Air 2024 M3
     // RELEASE Time:  0.102s Throughput: 312.227 MiB/s
     return r;
@@ -473,14 +506,18 @@ static int test5(struct lz* lz) {
     for (int i = 0; i < n; i++) {
         in[i] = (uint8_t)(256 * rand64(&seed));
     }
+    printf("random bytes\n");
     printf("n: %6d window: %5d\n", n, max_window);
+    uint64_t no_match = 0;
     uint64_t t = nanoseconds();
-    int r = test(lz, in, n, max_window, false);
+    int r = test(lz, in, n, max_window, &no_match, false);
     t = nanoseconds() - t;
     printf("Time: %6.3fs Throughput: %7.3f MiB/s ",
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
+    double as_is = 100.0 * (double)no_match / (double)n;
     double prev_per_byte = (double)lz->prev_count / (double)n;
-    printf("prev[] per byte: %7.3f max: %zd\n", prev_per_byte, lz->prev_max);
+    printf("prev[] per byte: %7.3f max: %zd as is: %.1f%%\n",
+            prev_per_byte, lz->prev_max, as_is);
     // 32MB on Mac Book Air 2024 M3
     // RELEASE Time:  0.608s Throughput:  52.612 MiB/s
     return r;
@@ -509,14 +546,18 @@ static int test6(struct lz* lz) {
             in[j] = b;
         }
     }
+    printf("random sequences of same byte at random positions\n");
     printf("n: %6d window: %5d\n", n, max_window);
+    uint64_t no_match = 0;
     uint64_t t = nanoseconds();
-    int r = test(lz, in, n, max_window, false);
+    int r = test(lz, in, n, max_window, &no_match, false);
     t = nanoseconds() - t;
     printf("Time: %6.3fs Throughput: %7.3f MiB/s ",
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
+    double as_is = 100.0 * (double)no_match / (double)n;
     double prev_per_byte = (double)lz->prev_count / (double)n;
-    printf("prev[] per byte: %7.3f max: %zd\n", prev_per_byte, lz->prev_max);
+    printf("prev[] per byte: %7.3f max: %zd as is: %.1f%%\n",
+            prev_per_byte, lz->prev_max, as_is);
     // 64MB on Mac Book Air 2024 M3
     // RELEASE Time:  1.159s Throughput:  55.222 MiB/s
     return r;
@@ -531,13 +572,16 @@ static int test_file(struct lz* lz, const char* fn) {
     errno_t r = file_read_fully(fn, &in, &n);
     if (r != 0) { return r; }
     printf("\"%s\" %zd bytes\n", fn, n);
+    uint64_t no_match = 0;
     uint64_t t = nanoseconds();
-    r = test(lz, in, n, max_window, false);
+    r = test(lz, in, n, max_window, &no_match, false);
     t = nanoseconds() - t;
     printf("Time: %6.3fs Throughput: %7.3f MiB/s ",
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
+    double as_is = 100.0 * (double)no_match / (double)n;
     double prev_per_byte = (double)lz->prev_count / (double)n;
-    printf("prev[] per byte: %7.3f max: %zd\n", prev_per_byte, lz->prev_max);
+    printf("prev[] per byte: %7.3f max: %zd as is: %.1f%%\n",
+            prev_per_byte, lz->prev_max, as_is);
     free(in);
     return r;
 }
