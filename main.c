@@ -4,6 +4,7 @@
 
 int maps_test(void);
 int lz_maps_test(void);
+int lz_map2_test(void);
 
 static errno_t locate_test_folder(void) {
     for (;;) {
@@ -21,7 +22,8 @@ int main(int argc, const char* argv[]) {
     errno_t r = locate_test_folder();
     if (r != 0) { return r; }
     if (argc >= 2 && strcmp(argv[1], "maps") == 0) { r = maps_test(); }
-    if (argc >= 2 && strcmp(argv[1], "lzm") == 0)  { r = lz_maps_test(); }
+    if (argc >= 2 && strcmp(argv[1], "lzm2") == 0) { r = lz_map2_test(); }
+    if (argc >= 2 && strcmp(argv[1], "lzm4") == 0) { r = lz_maps_test(); }
     return r;
 }
 

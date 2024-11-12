@@ -29,11 +29,6 @@ struct map {
 struct lz {
     size_t   prev[max_window]; // previous `i` of 4 bytes entry
     size_t   map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes
-    struct map map3;
-    struct map map4;
-    // entries for the maps (75% occupancy):
-    void* map3e[max_window + max_window / 2];
-    void* map4e[max_window + max_window / 2];
     uint64_t prev_count; // number of times `prev` was used
     size_t prev_max;     // maximum length of prev[] chain
 };
@@ -138,8 +133,6 @@ static inline bool map_get4(struct map* m, uint32_t b4, size_t* ix) {
 static void lz_init(struct lz *lz) {
     memset(lz->prev, 0, sizeof(lz->prev));
     memset(lz->map2, 0, sizeof(lz->map2));
-    map_init(&lz->map3, lz->map3e, sizeof(lz->map3e) / sizeof(lz->map3e[0]), 3);
-    map_init(&lz->map4, lz->map4e, sizeof(lz->map4e) / sizeof(lz->map4e[0]), 4);
     lz->prev_count = 0;
     lz->prev_max   = 0;
 }
@@ -148,37 +141,16 @@ static void lz_insert(struct lz* lz, const uint8_t* in, const size_t n,
                       const size_t w, const size_t i) {
     assert(min_window <= w && w <= max_window);
     assert(((w - 1) & w) == 0); // window is power of 2
-    if (i < n - 4) {
-        bool b;
-        if (i >= w) {
-            uint32_t w4 = *((uint32_t*)(in + i - w));
-            size_t ix;
-            b = map_get3(&lz->map3, w4 & 0xFFFFFF, &ix);
-            if (b && (uint8_t*)lz->map3.p[ix] <= in + i - w) {
-                map_remove(&lz->map3, ix);
-            }
-            b = map_get4(&lz->map4, w4, &ix);
-            if (b && (uint8_t*)lz->map4.p[ix] <= in + i - w) {
-                map_remove(&lz->map4, ix);
-            }
-        }
-        uint32_t b4 = *((uint32_t*)(in + i));
-        b = map_put3(&lz->map3, in + i, b4 & 0x00FFFFFFu);
-        assert(b);
-        size_t pp = 0; // previous position of 4 bytes entry
-        size_t ix;
-        bool seen = map_get4(&lz->map4, b4, &ix);
-        if (!seen) {
-            b = map_put4(&lz->map4, in + i, b4);
-            assert(b);
-        } else {
-            pp = (const uint8_t*)lz->map4.p[ix] - in;
-            lz->map4.p[ix] = in + i;
-        }
+    if (i < n - 2) {
+        const uint16_t b2 = *((uint16_t*)(in + i));
+        size_t pp = lz->map2[b2];
+        bool seen = pp != 0;
+        lz->map2[b2] = i + 1;
         const size_t index = i % w;
         if (!seen) {
             lz->prev[index] = 0;
         } else {
+            pp--; // because map2[] keeps +1 values
             // `i`, `pp` and `w` are unsigned,
             // if `i` may is less than `w` pp <= i - w is incorrect
             if (i <= w || i - w <= pp && pp < i) {
@@ -187,7 +159,6 @@ static void lz_insert(struct lz* lz, const uint8_t* in, const size_t n,
                 lz->prev[index] = 0;
             }
         }
-        lz->map2[ b4 & 0xFFFFu] = i + 1;
     }
 }
 
@@ -205,14 +176,12 @@ static inline void lz_find(struct lz* lz, const uint8_t* in, const size_t n,
     assert(*md == 0);
     size_t len = 0;
     size_t dst = 0;
-    const uint32_t b4 = *((uint32_t*)(in + i));
-    size_t p;
-    size_t ix;
-    bool b = map_get4(&lz->map4, b4, &ix);
-    if (b) {
-        p = (const uint8_t*)lz->map4.p[ix] - in;
+    const uint16_t b2 = *((uint16_t*)(in + i));
+    size_t p = lz->map2[b2];
+    if (p > 0) {
+        p--; // because map2[] keep position + 1
         size_t max_k = n - i > max_len ? max_len : n - i;
-        size_t k = 4; // start with at least 4
+        size_t k = 2; // start with at least 4
         while (k < max_k && in[p + k] == in[i + k]) { k++; }
         if (i - p <= w) { len = k; dst = i - p; }
         size_t index = p & (w - 1); // same as p % w for w = 2^x
@@ -220,7 +189,7 @@ static inline void lz_find(struct lz* lz, const uint8_t* in, const size_t n,
         size_t prev_chain = 0;
         while (len < max_len && 0 < d && d <= p && p - d < i && i <= p - d + w) {
             p -= d;
-            if (len == 4 || memcmp(in + p + 4, in + i + 4, len - 4) == 0) {
+            if (len == 2 || memcmp(in + p + 2, in + i + 2, len - 2) == 0) {
                 k = len; // because with `len` bytes are the same
                 while (k < max_k && in[p + k] == in[i + k]) { k++; }
                 if (k > len) { len = k; dst = i - p; }
@@ -231,20 +200,6 @@ static inline void lz_find(struct lz* lz, const uint8_t* in, const size_t n,
         }
         lz->prev_count += prev_chain;
         lz->prev_max = max(lz->prev_max, prev_chain);
-    }
-    if (len == 0) {
-        b = map_get3(&lz->map3, b4 & 0xFFFFFF, &ix);
-        if (b) {
-            p = (const uint8_t*)lz->map3.p[ix] - in;
-            if (i - p <= w) { len = 3; dst = i - p; }
-        }
-    }
-    if (len == 0) {
-        p = lz->map2[b4 & 0xFFFF];
-        if (p > 0) {
-            p--; // because map2[] keep position + 1
-            if (i - p <= w) { len = 2; dst = i - p; }
-        }
     }
     if (len > 0) {
         *ml = len;
@@ -257,7 +212,7 @@ static void lz_linear(const uint8_t* in, const size_t n,
                       size_t *ml, size_t *md) {
     assert(*ml == 0); // caller's responsibility
     assert(*md == 0);
-    if (1 <= i && i < n - 4) {
+    if (1 <= i && i < n - 2) {
         size_t len = 0;
         size_t dst = 0;
         size_t j = i - 1;
@@ -305,8 +260,9 @@ static int test(struct lz* lz, const uint8_t* in, const size_t n,
     size_t i = 0;
     lz_insert(lz, in, n, w, i);
     while (i < n) {
-        if (1 <= i && i < n - 4) {
+        if (1 <= i && i < n - 2) {
             size_t ml1 = 0, md1 = 0;
+            // TODO: accumulate last 2 bytes in a register (shifting and pass to find and insert)
             lz_find(lz, in, n, w, i, &ml1, &md1);
             #ifdef DEBUG
                 // TODO: this is incredibly slow
@@ -512,7 +468,7 @@ static int test_file(struct lz* lz, const char* fn) {
     return r;
 }
 
-int lz_maps_test(void) {
+int lz_map2_test(void) {
     static struct lz lz77;
     struct lz* lz = &lz77;
     return test0(lz) || test1(lz) || test2(lz) || test3(lz) ||
