@@ -377,11 +377,55 @@ static inline int debug_check_match(const uint8_t* in, size_t n, size_t w,
     }                                                           \
 } while (0)
 
+static uint64_t test_seq[6];  // match sequence counts
+static uint64_t test_matches; // total number of matches (including no match)
+
+static inline void debug_test_stat(size_t match_length) {
+    #ifdef DEBUG
+    enum { count = (int)(sizeof(test_seq) / sizeof(test_seq[0])) };
+    test_seq[min(count - 1, match_length)]++;
+    test_matches++;
+    #else
+    (void)match_length;
+    #endif
+}
+
+static inline void matches(size_t n) {
+    #ifdef DEBUG
+    enum { count = (int)(sizeof(test_seq) / sizeof(test_seq[0])) };
+    uint64_t total = 0; // sanity check
+    for (size_t i = 0; i < count; i++) { total += test_seq[i]; }
+    assert(total == test_matches);
+    assert(test_seq[1] == 0); // match starts with 2 bytes
+    const double matches = (double)test_matches;
+    printf("matches: ");
+    double p = 100.0 * (double)test_seq[0] / matches;
+    if (p >= 0.1) {
+        // interested in %% of "as is" bytes in respect of matches
+        // as well as %% in respect of total input bytes:
+        printf("\"as is\" %.1f%% (%zd of %zdm) ", p, test_seq[0], test_matches);
+        p = 100.0 * (double)test_seq[0] / (double)n;
+        printf("%.1f%% of %zdb ", p, n);
+    }
+    for (size_t i = 2; i < count - 1; i++) {
+        p = 100.0 * (double)test_seq[i] / matches;
+        if (p >= 0.1) { printf("%zd: %.1f%% ", i, p); }
+    }
+    p = 100.0 * (double)test_seq[count - 1] / matches;
+    if (p >= 0.1) { printf("%zd+: %.1f%%", count - 1, p); }
+    #else
+    (void)n;
+    #endif
+    printf("\n\n");
+}
+
 static int test(struct lz* lz, const uint8_t* in, const size_t n,
-                const size_t w, uint64_t *no_match, bool verbose) {
+                const size_t w, bool verbose) {
     assert(n >= 4);
     assert(min_window <= w && w <= max_window);
     lz_init(lz);
+    memset(test_seq, 0, sizeof(test_seq));
+    test_matches = 0;
     debug_dump_input(in, n, verbose);
     uint32_t incoming = *(uint32_t*)in;
     uint32_t leaving = incoming;
@@ -392,7 +436,7 @@ static int test(struct lz* lz, const uint8_t* in, const size_t n,
     while (i < n4) {
         size_t ml1 = 0, md1 = 0;
         lz_find(lz, in, n, w, i, incoming, &ml1, &md1);
-        if (ml1 == 0) { (*no_match)++; }
+        debug_test_stat(ml1);
         if (debug_check_match(in, n, w, i, ml1, md1)) { return 1; }
 //      printf("[%2zd] incoming: %.4s 0x%08X leaving: %.4s 0x%08X\n",
 //             i, &incoming, incoming, &leaving, leaving);
@@ -408,8 +452,7 @@ static int test0(struct lz* lz) {
     const size_t n = strlen(in);
     const size_t w = 8;
     printf("n: %6zd window: %5zd\n", n, w);
-    uint64_t no_match = 0;
-    return test(lz, (const uint8_t*)in, n, w, &no_match, true);
+    return test(lz, (const uint8_t*)in, n, w, true);
 }
 
 static int test1(struct lz* lz) {
@@ -417,8 +460,7 @@ static int test1(struct lz* lz) {
     const size_t n = strlen(in);
     const size_t w = min_window;
     printf("n: %6zd window: %5zd\n", n, w);
-    uint64_t no_match = 0;
-    return test(lz, (const uint8_t*)in, n, w, &no_match, true);
+    return test(lz, (const uint8_t*)in, n, w, true);
 }
 
 static int test2(struct lz* lz) {
@@ -427,8 +469,7 @@ static int test2(struct lz* lz) {
     size_t max_w = n < max_window ? n : max_window;
     for (size_t w = min_window; w < max_w; w += w) {
         printf("n: %6zd window: %5zd\n", n, w);
-        uint64_t no_match = 0;
-        if (test(lz, (const uint8_t*)in, n, w, &no_match, true)) { return 1; }
+        if (test(lz, (const uint8_t*)in, n, w, true)) { return 1; }
     }
     return 0;
 }
@@ -438,13 +479,13 @@ static uint64_t seed = 1; // random generator seed/state
 static int test3(struct lz* lz) {
     enum { N = 16, M = 256 * 1024, T = 1 }; // experimental
 //  enum { N = 16, M = 256, T = 32 };
-    printf("random \"aaa_aa_aaaa...\" patterns\n");
+    printf("### random \"aaa_aa_aaaa...\" patterns\n");
     static int pl[N] = { 0 };
     for (int t = 0; t < T; t++) {
         for (int i = 0; i < 16; i++) {
             pl[i] = 2 + (int)(rand64(&seed) * 2);
         }
-        uint8_t in[M] = {0};
+        static uint8_t in[M] = {0};
         int k = 0;
         int j = 0;
         while (k < M - 2) {
@@ -454,13 +495,12 @@ static int test3(struct lz* lz) {
             j = (j + 1) % N;
             if (k < M - 2) { in[k++] = '_'; }
         }
-        assert(in[sizeof(in) - 1] == 0);
+        in[sizeof(in) - 1] = 0;
         const size_t n = strlen((char*)in);
         size_t max_w = n < max_window ? n : max_window;
         for (size_t w = min_window; w < max_w; w += w) {
             trace("n: %6zd window: %5zd\n", n, w);
-            uint64_t no_match = 0;
-            if (test(lz, (const uint8_t*)in, n, w, &no_match, false)) { return 1; }
+            if (test(lz, (const uint8_t*)in, n, w, false)) { return 1; }
         }
     }
     return 0;
@@ -477,18 +517,15 @@ static int test4(struct lz* lz) {
     memset(in, 0x00, n);
     printf("all 0x00 bytes\n");
     printf("n: %6d window: %5d\n", n, w);
-    uint64_t no_match = 0;
     uint64_t t = nanoseconds();
-    int r = test(lz, in, n, w, &no_match, false);
+    int r = test(lz, in, n, w, false);
     t = nanoseconds() - t;
     printf("Time: %6.3fs Throughput: %7.3f MiB/s ",
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
-    double as_is = 100.0 * (double)no_match / (double)n;
     double prev_per_byte = (double)lz->prev_count / (double)n;
-    printf("prev[] per byte: %7.3f max: %zd as is: %.1f%%\n",
-            prev_per_byte, lz->prev_max, as_is);
-    // 32MB on Mac Book Air 2024 M3
-    // RELEASE Time:  0.102s Throughput: 312.227 MiB/s
+    printf("prev[] per byte: %7.3f max: %zd\n",
+            prev_per_byte, lz->prev_max);
+    matches(n);
     return r;
     #else
     return lz == 0;
@@ -506,20 +543,17 @@ static int test5(struct lz* lz) {
     for (int i = 0; i < n; i++) {
         in[i] = (uint8_t)(256 * rand64(&seed));
     }
-    printf("random bytes\n");
+    printf("### random bytes\n");
     printf("n: %6d window: %5d\n", n, max_window);
-    uint64_t no_match = 0;
     uint64_t t = nanoseconds();
-    int r = test(lz, in, n, max_window, &no_match, false);
+    int r = test(lz, in, n, max_window, false);
     t = nanoseconds() - t;
     printf("Time: %6.3fs Throughput: %7.3f MiB/s ",
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
-    double as_is = 100.0 * (double)no_match / (double)n;
     double prev_per_byte = (double)lz->prev_count / (double)n;
-    printf("prev[] per byte: %7.3f max: %zd as is: %.1f%%\n",
-            prev_per_byte, lz->prev_max, as_is);
-    // 32MB on Mac Book Air 2024 M3
-    // RELEASE Time:  0.608s Throughput:  52.612 MiB/s
+    printf("prev[] per byte: %7.3f max: %zd\n",
+            prev_per_byte, lz->prev_max);
+    matches(n);
     return r;
     #else
     return lz == 0;
@@ -546,20 +580,17 @@ static int test6(struct lz* lz) {
             in[j] = b;
         }
     }
-    printf("random sequences of same byte at random positions\n");
+    printf("### random sequences of same byte at random positions\n");
     printf("n: %6d window: %5d\n", n, max_window);
-    uint64_t no_match = 0;
     uint64_t t = nanoseconds();
-    int r = test(lz, in, n, max_window, &no_match, false);
+    int r = test(lz, in, n, max_window, false);
     t = nanoseconds() - t;
     printf("Time: %6.3fs Throughput: %7.3f MiB/s ",
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
-    double as_is = 100.0 * (double)no_match / (double)n;
     double prev_per_byte = (double)lz->prev_count / (double)n;
-    printf("prev[] per byte: %7.3f max: %zd as is: %.1f%%\n",
-            prev_per_byte, lz->prev_max, as_is);
-    // 64MB on Mac Book Air 2024 M3
-    // RELEASE Time:  1.159s Throughput:  55.222 MiB/s
+    printf("prev[] per byte: %7.3f max: %zd\n",
+            prev_per_byte, lz->prev_max);
+    matches(n);
     return r;
     #else
     return lz == 0;
@@ -571,17 +602,16 @@ static int test_file(struct lz* lz, const char* fn) {
     size_t n = 0;
     errno_t r = file_read_fully(fn, &in, &n);
     if (r != 0) { return r; }
-    printf("\"%s\" %zd bytes\n", fn, n);
-    uint64_t no_match = 0;
+    printf("### file: \"%s\" %zd bytes\n", fn, n);
     uint64_t t = nanoseconds();
-    r = test(lz, in, n, max_window, &no_match, false);
+    r = test(lz, in, n, max_window, false);
     t = nanoseconds() - t;
     printf("Time: %6.3fs Throughput: %7.3f MiB/s ",
             t / 1.0e9, n / (t / 1.0e9) / (1024 * 1024));
-    double as_is = 100.0 * (double)no_match / (double)n;
     double prev_per_byte = (double)lz->prev_count / (double)n;
-    printf("prev[] per byte: %7.3f max: %zd as is: %.1f%%\n",
-            prev_per_byte, lz->prev_max, as_is);
+    printf("prev[] per byte: %7.3f max: %zd\n",
+            prev_per_byte, lz->prev_max);
+    matches(n);
     free(in);
     return r;
 }
