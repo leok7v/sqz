@@ -145,13 +145,15 @@ static void lz_init(struct lz *lz) {
 }
 
 static void lz_insert(struct lz* lz, const uint8_t* in, const size_t n,
-                      const size_t w, const size_t i) {
+                      const size_t w, const size_t i, uint32_t incoming,
+                      uint32_t leaving) {
     assert(min_window <= w && w <= max_window);
     assert(((w - 1) & w) == 0); // window is power of 2
     if (i < n - 4) {
         bool b;
         if (i >= w) {
             uint32_t w4 = *((uint32_t*)(in + i - w));
+            swear(w4 == leaving);
             size_t ix;
             b = map_get3(&lz->map3, w4 & 0xFFFFFF, &ix);
             if (b && (uint8_t*)lz->map3.p[ix] <= in + i - w) {
@@ -163,6 +165,7 @@ static void lz_insert(struct lz* lz, const uint8_t* in, const size_t n,
             }
         }
         uint32_t b4 = *((uint32_t*)(in + i));
+        swear(b4 == incoming);
         b = map_put3(&lz->map3, in + i, b4 & 0x00FFFFFFu);
         assert(b);
         size_t pp = 0; // previous position of 4 bytes entry
@@ -198,6 +201,7 @@ static void lz_insert(struct lz* lz, const uint8_t* in, const size_t n,
 
 static inline void lz_find(struct lz* lz, const uint8_t* in, const size_t n,
                            const size_t w, const size_t i,
+                           uint32_t leaving,
                            size_t *ml, size_t *md) {
     assert(min_window <= w && w <= max_window);
     assert(((w - 1) & w) == 0); // window is power of 2
@@ -206,6 +210,7 @@ static inline void lz_find(struct lz* lz, const uint8_t* in, const size_t n,
     size_t len = 0;
     size_t dst = 0;
     const uint32_t b4 = *((uint32_t*)(in + i));
+    swear(b4 == leaving);
     size_t p;
     size_t ix;
     bool b = map_get4(&lz->map4, b4, &ix);
@@ -281,10 +286,9 @@ static void lz_linear(const uint8_t* in, const size_t n,
 
 // tests:
 
-static uint64_t seed = 1; // random generator seed/state
-
 static int test(struct lz* lz, const uint8_t* in, const size_t n,
                 const size_t w, bool verbose) {
+    assert(n >= 4);
     assert(min_window <= w && w <= max_window);
     lz_init(lz);
     #ifdef DEBUG
@@ -302,12 +306,15 @@ static int test(struct lz* lz, const uint8_t* in, const size_t n,
     #else
     (void)verbose;
     #endif
+    uint32_t incoming = *(uint32_t*)in;
+    uint32_t leaving  = incoming;
     size_t i = 0;
-    lz_insert(lz, in, n, w, i);
-    while (i < n) {
+    // TODO: accumulate incoming 4 bytes in a register (shifting and pass to find and insert)
+    //       so they do not need to be read from odd locations
+    while (i < n - 4) {
         if (1 <= i && i < n - 4) {
             size_t ml1 = 0, md1 = 0;
-            lz_find(lz, in, n, w, i, &ml1, &md1);
+            lz_find(lz, in, n, w, i, incoming, &ml1, &md1);
             #ifdef DEBUG
                 // TODO: this is incredibly slow
                 //       need an option (compile or runtime)
@@ -325,31 +332,54 @@ static int test(struct lz* lz, const uint8_t* in, const size_t n,
                     if (ml1 != ml2 || md1 != md2) { return 1; }
                     size_t next_i = i + ml1;
                     while (i < next_i) {
-                        lz_insert(lz, in, n, w, i);
+                        lz_insert(lz, in, n, w, i, incoming, leaving);
                         i++;
+                        incoming = (incoming >> 8) | (((uint32_t)in[i + 3]) << 24);
+                        if (i > w - 4) {
+                            leaving = (leaving >> 8) | (((uint32_t)in[i - w + 3]) << 24);
+                        }
                     }
                 } else {
-                    lz_insert(lz, in, n, w, i);
+                    lz_insert(lz, in, n, w, i, incoming, leaving);
                     i++;
+                    incoming = (incoming >> 8) | (((uint32_t)in[i + 3]) << 24);
+                    if (i > w - 4) {
+                        leaving = (leaving >> 8) | (((uint32_t)in[i - w + 3]) << 24);
+                    }
                 }
             #else
                 if (ml1 > 0) {
                     size_t next_i = i + ml1;
                     while (i < next_i) {
-                        lz_insert(lz, in, n, w, i);
+                        lz_insert(lz, in, n, w, i, incoming, leaving);
                         i++;
+                        incoming = (incoming >> 8) | (((uint32_t)in[i + 3]) << 24);
+                        if (i > w - 4) {
+                            leaving = (leaving >> 8) | (((uint32_t)in[i - w + 3]) << 24);
+                        }
                     }
                 } else {
-                    lz_insert(lz, in, n, w, i);
+                    lz_insert(lz, in, n, w, i, incoming, leaving);
                     i++;
+                    incoming = (incoming >> 8) | (((uint32_t)in[i + 3]) << 24);
+                    if (i > w - 4) {
+                        leaving = (leaving >> 8) | (((uint32_t)in[i - w + 3]) << 24);
+                    }
                 }
             #endif
         } else {
+            lz_insert(lz, in, n, w, i, incoming, leaving);
             i++;
+            incoming = (incoming >> 8) | (((uint32_t)in[i + 3]) << 24);
+            if (i > w - 4) {
+                leaving = (leaving >> 8) | (((uint32_t)in[i - w + 3]) << 24);
+            }
         }
     }
     return 0;
 }
+
+static uint64_t seed = 1; // random generator seed/state
 
 static int test0(struct lz* lz) {
     const char* in = "_abc;abd:abe_";
