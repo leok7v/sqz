@@ -1,4 +1,3 @@
-#define  UNSTD_NO_RT_IMPLEMENTATION
 #include "rt/ustd.h"
 #include "rt/fileio.h"
 
@@ -132,36 +131,15 @@ static inline void map_remove(struct map* m, size_t i) {
         const uint32_t b4 = *(uint32_t*)m->p[x];
         size_t h = map_hash(m, b4 & m->m);
         // Check if `h` lies within [i, x), accounting for wrap-around:
-        if ((x < i) ^ (h <= i) ^ (h > x)) { // can move
+        const bool can_move = i <= x ? x < h || h <= i :
+                                       x < h && h <= i;
+        if (can_move) {
             m->p[i] = m->p[x];
             m->p[x] = 0;
             i = x;
         }
     }
 }
-
-/*
-
-   Case 1: No wrap-around, i < x and h lies between i and x
-   [__0__|__1__|__2__|__3__|__4__|__5__|__6__|__7__]
-                i:2         h:4         x:6
-   In this case, i < x and h is within the straightforward range [i, x).
-
-   Case 2: Wrap-around, x < i, and h lies before i
-   [__0__|__1__|__2__|__3__|__4__|__5__|__6__|__7__]
-          h:1   x:2                     i:6
-   Here, with x < i and h <= i, h falls in the wrapped-around portion
-   [i, n-1] + [0, x).
-
-   Case 3: Wrap-around, x < i, and h lies beyond x
-   [__0__|__1__|__2__|__3__|__4__|__5__|__6__|__7__]
-                x:2                     i:6   h:7
-   In this case, x < i and h > x, so h is in the range [i, n-1] + [0, x).
-
-   This combined condition (x < i) ^ (h <= i) ^ (h > x) with exclusive OR
-   clauses accurately identifies if h is in [i, x), regardless of wrap-around.
-
-*/
 
 static inline bool map_put(struct map* m, const void* p,
                       const size_t h, uint32_t k) {
@@ -402,9 +380,79 @@ static errno_t locate_test_folder(void) {
     }
 }
 
-int maps_main(int argc, const char* argv[]) {
-    (void)argc; (void)argv; // unused
-    errno_t r = locate_test_folder();
-    if (r != 0) { return r; }
+#define map(tk, tv, n) struct { tv v[n]; tk k[n]; }
+
+bool map_put_int(const void* m, const void* v, const void* k, size_t n,
+                 void* key, void* val, size_t b) {
+    printf("[%zd] %d 0x%016llX:%zd\n", n, *(int*)key, *(uint64_t*)val, b);
+    (void)m; // unused
+    (void)k; // unused
+    size_t ix = 0;
+    uint8_t* p = (uint8_t*)v + ix * b;
+    memcpy(p, val, b);
+    return true;
+}
+
+bool map_put_float(const void* m, const void* v, const void* k, size_t n,
+                   void* key, void* val, size_t b) {
+    printf("[%zd] %f 0x%016llX:%zd\n", n, *(float*)key, *(uint64_t*)v, b);
+    (void)m; // unused
+    (void)k; // unused
+    size_t ix = 0;
+    uint8_t* p = (uint8_t*)v + ix * b;
+    memcpy(p, val, b);
+    return true;
+}
+
+const void* map_get_int(const void* m, const void* v, const void* k, size_t n,
+                        void* key, size_t b) {
+    printf("[%zd] %f b:%zd\n", n, *(float*)key, b);
+    (void)m; // unused
+    (void)k; // unused
+    size_t ix = 0;
+    uint8_t* p = (uint8_t*)v + ix * b;
+    return p;
+}
+
+const void* map_get_float(const void* m, const void* v, const void* k, size_t n,
+                          void* key, size_t b) {
+    printf("[%zd] %f b:%zd\n", n, *(float*)key, b);
+    (void)m; // unused
+    (void)k; // unused
+    size_t ix = 0;
+    uint8_t* p = (uint8_t*)v + ix * b;
+    return p;
+}
+
+#define map_init(m) memset((m), 0, sizeof(*(m)));
+
+#define map_put(m, key, val) _Generic((key), int: map_put_int, float: map_put_float) \
+    ((void*)m, ((void*)(m)->k), ((void*)(m)->v), \
+     sizeof((m)->k) / sizeof((m)->k[0]), \
+     &(typeof(key)){key},&(typeof(val)){val},sizeof(val))
+
+#define map_get(m, key) (typeof((m)->v[0])*)(_Generic((key), int: map_get_int, float: map_get_float) \
+    ((const void*)m, ((void*)(m)->k), ((void*)(m)->v), \
+      sizeof((m)->k) / sizeof((m)->k[0]), \
+      &(typeof(key)){key}, sizeof((m)->v[0])))
+
+int maps_test(void) {
+    map(int, double, 16) m1 = {0};
+    map(float, double, 16) m2 = {0};
+    typedef map(int, double, 16) map_int_double_16;
+    typedef map(float, double, 16) map_float_double_16;
+
+    map_init(&m1);
+    map_init(&m2);
+
+    int i = 123;
+    float f = 321.467f;
+
+    map_put(&m1, 123, 999.999);
+    map_put(&m2, 321.467f, 666.666);
+    double* ri = map_get(&m1, i);
+    double* rf = map_get(&m2, f);
+    printf("ri: %f\n", *ri);
+    printf("ri: %f\n", *rf);
     return test();
 }

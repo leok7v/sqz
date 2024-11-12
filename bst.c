@@ -674,3 +674,6 @@ int main(int argc, const char* argv[]) {
     test5();
     return 0;
 }
+
+#define rt_implementation
+#include "rt/rt.h"

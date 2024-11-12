@@ -8,11 +8,6 @@
 
 #include "rt.h"
 
-#ifndef UNSTD_NO_RT_IMPLEMENTATION
-#define rt_implementation
-#include "rt.h" // implement all functions in header file
-#endif
-
 #ifndef UNSTD_NO_SHORTHAND
 
 #undef assert

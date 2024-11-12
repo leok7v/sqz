@@ -56,7 +56,13 @@
 
 #define rt_countof(a) (sizeof(a) / sizeof((a)[0]))
 
+#ifndef __cplusplus
 #include "rt_generics.h"
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 int32_t rt_exit(int exit_code);
 
@@ -84,6 +90,9 @@ int32_t rt_printf_implementation(const char* file, int32_t line,
 #define rt_breakpoint() raise(SIGINT)
 #endif
 
+#ifdef __cplusplus
+} // extern "C"
+#endif
 
 #if defined(_MSC_VER)
     #define rt_swear(b, ...) ((void)                                        \
@@ -115,6 +124,10 @@ typedef struct rt_debug_output_s {
     int32_t max_prefix_len;
     int32_t max_function_len;
 } rt_debug_output_t;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 static void rt_output_line(const char* s) {
     const char* text = s;
@@ -157,10 +170,10 @@ static void rt_flush_buffer(rt_debug_output_t* out, const char* file,
         while (end != null) {
             *end = '\0';
             char output[2 * 1024];
-            out->max_prefix_len = rt_max(out->max_prefix_len,
-                                        (int32_t)strlen(prefix));
-            out->max_function_len = rt_max(out->max_function_len,
-                                           (int32_t)strlen(function));
+            const int32_t pl = (int32_t)strlen(prefix);
+            const int32_t fl = (int32_t)strlen(function);
+            if (out->max_prefix_len < pl) { out->max_prefix_len = pl; }
+            if (out->max_function_len < fl) { out->max_function_len = fl; }
             snprintf(output, sizeof(output) - 1, "%-*s %-*s %s\n",
                      (unsigned int)out->max_prefix_len, prefix,
                      (unsigned int)out->max_function_len, function,
@@ -237,7 +250,7 @@ int32_t rt_printf_implementation(const char* file, int32_t line,
 
 int32_t rt_exit(int exit_code) {
     #ifdef _WINDOWS_
-        ExitProcess(exit_code);
+        ExitProcess((UINT)exit_code);
     #else
         exit(exit_code);
     #endif
@@ -274,7 +287,7 @@ double rt_rand64(uint64_t *state) { // [0.0..1.0) exclusive to 1.0
     return (double)rt_random64(state) / ((double)UINT64_MAX + 1.0);
 }
 
-static void rt_printf_test_utf8_and_emoji(void) {
+void rt_printf_test_utf8_and_emoji(void) {
     printf("\xF0\x9F\x98\x80 Hello\xF0\x9F\x91\x8B "
            "world\xF0\x9F\x8C\x8D!\n\xF0\x9F\x98\xA1 Goodbye "
            "\xF0\x9F\x98\x88 cruel \xF0\x9F\x98\xB1 "
@@ -293,5 +306,10 @@ static void rt_printf_test_utf8_and_emoji(void) {
               "Universe \xF0\x9F\x8C\xA0\xF0\x9F\x8C\x8C..."
               "\xF0\x9F\x92\xA4\n");
 }
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
 
 #endif // rt_implementation

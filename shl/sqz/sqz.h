@@ -121,7 +121,6 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes);
 #include <stdio.h>
 #include <string.h>
 
-#define UNSTD_NO_RT_IMPLEMENTATION // TODO: remove
 #include "rt/ustd.h"               // TODO: remove
 
 static_assert(sizeof(int) >= 4, "32 bits minimum"); // 16 bit int unsupported

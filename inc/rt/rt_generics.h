@@ -1,7 +1,7 @@
 #ifndef rt_generics_header_included
 #define rt_generics_header_included
 
-#if __has_include(<alloca.h>) // alloca()
+#if __has_include(<alloca.h>) // alloca() for swap
 #include <alloca.h>
 #elif __has_include(<malloc.h>)
 #include <malloc.h>
@@ -37,11 +37,6 @@ typedef long double fp80_t; // TODO: rt_implement and rt_dispatch
 #else
     #define rt_alloca(n) alloca(n) // fallback
 #endif
-
-inline void rt_cannot_dispatch(void) {
-    static void (*crash)(void); // == 0
-    crash(); // this should not be called
-}
 
 #define rt_max_(n, t) inline t rt_max_ ## n(t x, t y) { return x > y ? x : y; }
 #define rt_min_(n, t) inline t rt_min_ ## n(t x, t y) { return x < y ? x : y; }
@@ -104,8 +99,7 @@ rt_implement_for_pointer_types(rt_min_)
         long int:               f ## _long_int,                 \
         long long int:          f ## _long_long_int,            \
         float:                  f ## _float,                    \
-        double:                 f ## _double,                   \
-        default:                rt_cannot_dispatch))((x), (y))
+        double:                 f ## _double))((x), (y))
 
 #define rt_max(x, y) rt_dispatch_for_scalar_types(rt_max, x, y)
 #define rt_min(x, y) rt_dispatch_for_scalar_types(rt_min, x, y)
@@ -116,6 +110,11 @@ rt_implement_for_pointer_types(rt_min_)
 
 rt_implement_for_scalar_types(rt_swap_t)
 rt_implement_for_pointer_types(rt_swap_t)
+
+#define rt_implement_swap_struct(t)       \
+inline void rt_swap_ ## t(t *a, t *b, ) { \
+    T swap = a; a = b; b = swap;          \
+}
 
 inline void rt_swap_struct(void* a, void *b, size_t bytes) {
     void* swap = rt_alloca(bytes);

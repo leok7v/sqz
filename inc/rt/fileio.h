@@ -1,6 +1,9 @@
 #ifndef file_header_included
 #define file_header_included
 
+#ifndef assert
+#include <assert.h>
+#endif
 #include <errno.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -28,6 +31,10 @@ struct io { // either memory or file i/o:
     int32_t  error;    // sticky
     bool     fail_fast;
 };
+
+#ifndef swear
+#define swear(...) assert(__VA_ARGS__)
+#endif
 
 static errno_t file_chdir(const char* name);
 static bool    file_exist(const char* filename);

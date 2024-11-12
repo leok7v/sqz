@@ -205,6 +205,11 @@ static errno_t locate_test_folder(void) {
     // So we need to find the test files.
     for (;;) {
         if (file_exist("test/bible.txt")) { return 0; }
+        char cwd[1024] = {0};
+        if (!getcwd(cwd, sizeof(cwd))) { return ENOENT; }
+        if (strcmp(cwd + 1, ":\\") == 0 || strcmp(cwd, "/") == 0) {
+            return ENOENT; // at root
+        }
         if (file_chdir("..") != 0) { return errno; }
     }
 }
@@ -254,3 +259,5 @@ int main(int argc, const char* argv[]) {
     return r;
 }
 
+#define rt_implementation
+#include "rt/rt.h"

@@ -1,4 +1,3 @@
-#define  UNSTD_NO_RT_IMPLEMENTATION
 #include "rt/ustd.h"
 #include "rt/fileio.h"
 
@@ -85,7 +84,9 @@ static inline void map_remove(struct map* m, size_t i) {
         const uint32_t b4 = *(uint32_t*)m->p[x];
         size_t h = map_hash(m, b4 & m->m);
         // Check if `h` lies within [i, x), accounting for wrap-around:
-        if ((x < i) ^ (h <= i) ^ (h > x)) { // can move
+        const bool can_move = i <= x ? x < h || h <= i :
+                                       x < h && h <= i;
+        if (can_move) {
             m->p[i] = m->p[x];
             m->p[x] = 0;
             i = x;
@@ -495,17 +496,7 @@ static int test_file(struct lz* lz, const char* fn) {
     return r;
 }
 
-static errno_t locate_test_folder(void) {
-    for (;;) {
-        if (file_exist("test/bible.txt")) { return 0; }
-        if (file_chdir("..") != 0) { return errno; }
-    }
-}
-
-int main(int argc, const char* argv[]) {
-    (void)argc; (void)argv; // unused
-    errno_t r = locate_test_folder();
-    if (r != 0) { return r; }
+int lz_maps_test(void) {
     static struct lz lz77;
     struct lz* lz = &lz77;
     return test0(lz) || test1(lz) || test2(lz) || test3(lz) ||

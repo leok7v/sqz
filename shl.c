@@ -74,3 +74,6 @@ int main(int argc, const char* argv[]) {
 
 #define sqz_implementation
 #include "shl/sqz/sqz.h"
+
+#define rt_implementation
+#include "rt/rt.h"

@@ -53,6 +53,7 @@
   <ItemGroup>
     <ClCompile Include="..\lz.c" />
     <ClCompile Include="..\lz_maps.c" />
+    <ClCompile Include="..\main.c" />
     <ClCompile Include="..\maps.c" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
