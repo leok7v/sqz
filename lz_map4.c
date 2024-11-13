@@ -5,6 +5,9 @@
 // https://en.wikipedia.org/wiki/Two-way_string-matching_algorithm
 // https://en.wikipedia.org/wiki/LZ77_and_LZ78
 
+#undef  LZ_TEST_STATS // to measure throughput
+#define LZ_TEST_STATS
+
 #define LZ_VERBOSE
 #undef  LZ_VERBOSE
 
@@ -377,46 +380,111 @@ static inline int debug_check_match(const uint8_t* in, size_t n, size_t w,
     }                                                           \
 } while (0)
 
-static uint64_t test_seq[6];  // match sequence counts
-static uint64_t test_matches; // total number of matches (including no match)
+enum { test_stats_count = 9 };
 
-static inline void debug_test_stat(size_t match_length) {
-    #ifdef DEBUG
-    enum { count = (int)(sizeof(test_seq) / sizeof(test_seq[0])) };
-    test_seq[min(count - 1, match_length)]++;
-    test_matches++;
+static struct {
+    uint64_t bytes;                 // total number of bytes in in[n]
+    uint64_t matches;               // total number of matches (including no match)
+    uint64_t seq[test_stats_count]; // number of match of this length
+    uint64_t sum[test_stats_count]; // sum of bytes per sequence
+    // running averages:
+    double   avg_len[test_stats_count]; // of bits per sequence length
+    double   avg_dst[test_stats_count]; // of bits per sequence distance
+    double   avg_l2d;                   // of bits per 2 bytes sequence
+} ts; // test stats
+
+static inline uint8_t bits_of(uint64_t i) {
+    uint8_t bits = 0;
+    while (i > 0) { i >>= 1; bits++; }
+    return bits;  // 0 bits for i == 0
+}
+
+static void running_average(double *ra, uint64_t v) {
+    *ra = (*ra * (ts.matches - 1) + (double)v) / ts.matches;
+}
+
+static inline void debug_test_stat(size_t ml, size_t md) {
+    // `ml` match length >= 2 or zero
+    // `md` match distance >= 1
+    #if defined(DEBUG) || defined(LZ_TEST_STATS)
+    ts.matches++;
+    assert(ml != 1);
+    assert(md >= 1 || md == 0);
+    uint8_t bl = bits_of(ml);
+    uint8_t bm = bits_of(md);
+    if (ml == 0) { ml++; }
+    size_t ix = min(test_stats_count - 1, ml);
+    ts.seq[ix]++;
+    ts.sum[ix] += ml;
+    if (md > 0) {
+        running_average(&ts.avg_len[ix], bl);
+        running_average(&ts.avg_dst[ix], bm);
+        // Special case 2 bytes. Only take into account distances <= 0xFF
+        if (ml == 2 && md <= 0xFF) {
+            running_average(&ts.avg_l2d, bm);
+            // seq[0] used for special case of 2 bytes 1 byte distance
+            ts.seq[0]++;
+            ts.sum[0] += ml;
+        }
+    }
     #else
-    (void)match_length;
+    (void)ml;
     #endif
 }
 
-static inline void matches(size_t n) {
-    #ifdef DEBUG
-    enum { count = (int)(sizeof(test_seq) / sizeof(test_seq[0])) };
-    uint64_t total = 0; // sanity check
-    for (size_t i = 0; i < count; i++) { total += test_seq[i]; }
-    assert(total == test_matches);
-    assert(test_seq[1] == 0); // match starts with 2 bytes
-    const double matches = (double)test_matches;
-    printf("matches: ");
-    double p = 100.0 * (double)test_seq[0] / matches;
+static inline void matches(void) {
+    #if defined(DEBUG) || defined(LZ_TEST_STATS)
+    enum { n = test_stats_count };
+    // sanity check
+    uint64_t tm = 0; // total number of matches
+    for (size_t i = 0; i < n; i++) { tm += ts.seq[i]; }
+    assert(tm == ts.matches);
+    uint64_t tb = 0; // total number of bytes
+    for (size_t i = 0; i < n; i++) { tb += ts.sum[i]; }
+    assert(ts.bytes - tb <= 5); // because we can have match at the end
+    assert(ts.seq[0] == 0); // match starts with 2 bytes
+    // Stats per match
+    printf("per match: %7lld ", ts.matches);
+    const double m = (double)ts.matches;
+    double p = 100.0 * (double)ts.seq[1] / m;
     if (p >= 0.1) {
         // interested in %% of "as is" bytes in respect of matches
         // as well as %% in respect of total input bytes:
-        printf("\"as is\" %.1f%% (%zd of %zdm) ", p, test_seq[0], test_matches);
-        p = 100.0 * (double)test_seq[0] / (double)n;
-        printf("%.1f%% of %zdb ", p, n);
+        printf("\"as is\" %.1f%% ", p);
     }
-    for (size_t i = 2; i < count - 1; i++) {
-        p = 100.0 * (double)test_seq[i] / matches;
+    for (size_t i = 2; i < n - 1; i++) {
+        p = 100.0 * (double)ts.seq[i] / m;
         if (p >= 0.1) { printf("%zd: %.1f%% ", i, p); }
     }
-    p = 100.0 * (double)test_seq[count - 1] / matches;
-    if (p >= 0.1) { printf("%zd+: %.1f%%", count - 1, p); }
-    #else
-    (void)n;
+    p = 100.0 * (double)ts.seq[n - 1] / m;
+    if (p >= 0.1) { printf("%d+: %.1f%% ", n - 1, p); }
+    p = 100.0 * (double)ts.seq[0] / m;
+    printf("l2:d1: %.1f%%\n", p);
+    // Stats per input byte
+    printf("per byte:  %7lld ", ts.bytes);
+    const double b = (double)ts.bytes;
+    p = 100.0 * (double)ts.sum[1] / b;
+    if (p >= 0.1) {
+        printf("\"as is\" %.1f%% ", p);
+    }
+    for (size_t i = 2; i < n - 1; i++) {
+        p = 100.0 * (double)ts.sum[i] / b;
+        if (p >= 0.1) { printf("%zd: %.1f%% ", i, p); }
+    }
+    p = 100.0 * (double)ts.sum[n - 1] / b;
+    if (p >= 0.1) { printf("%d+: %.1f%% ", n - 1, p); }
+    p = 100.0 * (double)ts.sum[0] / b;
+    printf("l2:d1: %.1f%%\n", p);
+    // Averages per match:
+    printf("bits [len:dst] ");
+    for (size_t i = 2; i < n; i++) {
+        if (ts.avg_len[i] + ts.avg_dst[i] > 0.01) {
+            printf("%zd: [%.1f:%.1f] ", i, ts.avg_len[i], ts.avg_dst[i]);
+        }
+    }
+    printf("l2:d1: %.1f\n", ts.avg_l2d); // clipped distance
     #endif
-    printf("\n\n");
+    printf("\n");
 }
 
 static int test(struct lz* lz, const uint8_t* in, const size_t n,
@@ -424,8 +492,8 @@ static int test(struct lz* lz, const uint8_t* in, const size_t n,
     assert(n >= 4);
     assert(min_window <= w && w <= max_window);
     lz_init(lz);
-    memset(test_seq, 0, sizeof(test_seq));
-    test_matches = 0;
+    memset(&ts, 0, sizeof(ts));
+    ts.bytes = n;
     debug_dump_input(in, n, verbose);
     uint32_t incoming = *(uint32_t*)in;
     uint32_t leaving = incoming;
@@ -436,7 +504,7 @@ static int test(struct lz* lz, const uint8_t* in, const size_t n,
     while (i < n4) {
         size_t ml1 = 0, md1 = 0;
         lz_find(lz, in, n, w, i, incoming, &ml1, &md1);
-        debug_test_stat(ml1);
+        debug_test_stat(ml1, md1);
         if (debug_check_match(in, n, w, i, ml1, md1)) { return 1; }
 //      printf("[%2zd] incoming: %.4s 0x%08X leaving: %.4s 0x%08X\n",
 //             i, &incoming, incoming, &leaving, leaving);
@@ -477,9 +545,8 @@ static int test2(struct lz* lz) {
 static uint64_t seed = 1; // random generator seed/state
 
 static int test3(struct lz* lz) {
-    enum { N = 16, M = 256 * 1024, T = 1 }; // experimental
-//  enum { N = 16, M = 256, T = 32 };
-    printf("### random \"aaa_aa_aaaa...\" patterns\n");
+    enum { N = 16, M = 256 * 1024, T = 1 };
+    printf("### Random \"aaa_aa_aaaa...\" patterns\n");
     static int pl[N] = { 0 };
     for (int t = 0; t < T; t++) {
         for (int i = 0; i < 16; i++) {
@@ -525,7 +592,7 @@ static int test4(struct lz* lz) {
     double prev_per_byte = (double)lz->prev_count / (double)n;
     printf("prev[] per byte: %7.3f max: %zd\n",
             prev_per_byte, lz->prev_max);
-    matches(n);
+    matches();
     return r;
     #else
     return lz == 0;
@@ -543,7 +610,7 @@ static int test5(struct lz* lz) {
     for (int i = 0; i < n; i++) {
         in[i] = (uint8_t)(256 * rand64(&seed));
     }
-    printf("### random bytes\n");
+    printf("### All random bytes\n");
     printf("n: %6d window: %5d\n", n, max_window);
     uint64_t t = nanoseconds();
     int r = test(lz, in, n, max_window, false);
@@ -553,7 +620,7 @@ static int test5(struct lz* lz) {
     double prev_per_byte = (double)lz->prev_count / (double)n;
     printf("prev[] per byte: %7.3f max: %zd\n",
             prev_per_byte, lz->prev_max);
-    matches(n);
+    matches();
     return r;
     #else
     return lz == 0;
@@ -580,7 +647,7 @@ static int test6(struct lz* lz) {
             in[j] = b;
         }
     }
-    printf("### random sequences of same byte at random positions\n");
+    printf("### Random sequences of same byte at random positions\n");
     printf("n: %6d window: %5d\n", n, max_window);
     uint64_t t = nanoseconds();
     int r = test(lz, in, n, max_window, false);
@@ -590,7 +657,7 @@ static int test6(struct lz* lz) {
     double prev_per_byte = (double)lz->prev_count / (double)n;
     printf("prev[] per byte: %7.3f max: %zd\n",
             prev_per_byte, lz->prev_max);
-    matches(n);
+    matches();
     return r;
     #else
     return lz == 0;
@@ -611,16 +678,37 @@ static int test_file(struct lz* lz, const char* fn) {
     double prev_per_byte = (double)lz->prev_count / (double)n;
     printf("prev[] per byte: %7.3f max: %zd\n",
             prev_per_byte, lz->prev_max);
-    matches(n);
+    matches();
     free(in);
     return r;
+}
+
+static int test_files(struct lz* lz) {
+    const char* files[] = {
+        "test/hhgttg.txt",
+        "test/bible.txt",
+        "test/confucius.txt",
+        "test/lao-tzu.txt",
+        "test/laozi.txt",
+        "test/mandrill.bmp",
+        "test/mandrill.png",
+        "test/sqlite3.c",
+        "test/arm64.elf",
+        "test/x64.elf",
+    };
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        int r = test_file(lz, files[i]);
+        if (r) { return r; }
+    }
+    return 0;
 }
 
 int lz_maps_test(void) {
     static struct lz lz77;
     struct lz* lz = &lz77;
+    #if defined(LZ_TEST_STATS) && !defined(DEBUG)
+    if (test_files(lz)) { return 1; } // very slow RELEASE only
+    #endif
     return test0(lz) || test1(lz) || test2(lz) || test3(lz) ||
-           test4(lz) || test5(lz) || test6(lz) ||
-           test_file(lz, "test/bible.txt") ||
-           test_file(lz, "test/mandrill.png");
+           test4(lz) || test5(lz) || test6(lz);
 }
