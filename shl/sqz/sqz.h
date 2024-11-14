@@ -6,7 +6,9 @@
 
 enum {
     sqz_min_win_bits  =  10,
-    sqz_max_win_bits  =  15
+    sqz_max_win_bits  =  16,
+    sqz_min_window    = 1u << sqz_min_win_bits,
+    sqz_max_window    = 1u << sqz_max_win_bits
 };
 
 // See: posix errno.h https://pubs.opengroup.org/onlinepubs/9699919799/
@@ -23,20 +25,6 @@ enum {
 // #define sqz_err_unsupported  40 // ENOSYS: Functionality not supported
 // #define sqz_err_no_space     55 // ENOBUFS: No buffer space available
 
-struct tree_node {
-    const  uint8_t*   data;
-    struct tree_node* ln;
-    struct tree_node* rn;
-};
-
-struct tree {
-    struct tree_node* root;
-    struct tree_node  nodes[(1u << sqz_max_win_bits)];
-    struct tree_node* free_list;
-    size_t used;
-};
-
-
 struct prob_model  { // probability model
     uint64_t freq[256];
     uint64_t tree[256]; // Fenwick Tree (aka BITS)
@@ -52,39 +40,39 @@ struct range_coder {
     int32_t  padding;
 };
 
-struct map_entry {
-    const uint8_t* data;
-    uint64_t hash;
-    int32_t  bytes; // 0 empty, -1 removed
-};
-
 struct map {
-    struct map_entry* entry;
-    uint32_t n;
-    uint32_t entries;
-    uint32_t max_chain;
-    uint32_t max_bytes;
+    const void** p; // p[n]
+    size_t       n; // number of entries in the map (max_window * 4)
+    uint32_t     m; // mask 0xFFFFFF for 3 bytes and 0xFFFFFFFFu for 4 bytes
+    uint32_t     padding; // shut up annoying compiler warning
 };
 
 struct sqz {
-    struct range_coder rc;
-    void*  that;                    // convenience for caller i/o override
-    struct tree        tree;
+    struct range_coder rc; // must be first field for callbacks
+    void*  that;    // convenience for caller i/o override
+    void*  padding; // padding for 32-bit compilers with 8 bytes allignment
     struct prob_model  pm_literal;  // 0..1
     struct prob_model  pm_size;     // size: 0..255
     struct prob_model  pm_byte;     // single byte
     struct prob_model  pm_bits;     // 0..31 number of bits in distance
     struct prob_model  pm_dist[32]; // 0..1 per bit distance probability
-    struct map         map;         // caller supplied memory for map
+    size_t prev[sqz_max_window];    // previous `i` of 4 bytes entry
+    size_t map2[((size_t)UINT16_MAX) + 1]; // `i` + 1 of 2 bytes
+    struct map map3;
+    struct map map4;
+    // entries for the maps (75% occupancy):
+    void* map3e[sqz_max_window + sqz_max_window / 2];
+    void* map4e[sqz_max_window + sqz_max_window / 2];
 };
 
-static_assert(offsetof(struct sqz, rc) == 0, "rc must be first field of sqz");
+// TODO: we need better range coder callback to remove this ugly requirement
+static_assert(offsetof(struct sqz, rc) == 0);
 
 #if defined(__cplusplus)
 extern "C" {
 #endif
 
-void     sqz_init(struct sqz* s, struct map_entry entry[], size_t n);
+void     sqz_init(struct sqz* s);
 void     sqz_compress(struct sqz* s, const void* d, size_t b, uint32_t window);
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes);
 
@@ -102,15 +90,6 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes);
 #endif // sqz_h
 
 #ifdef sqz_implementation
-#ifdef _MSC_VER // cl.exe compiler:
-#pragma warning(disable: 4710) // '...': function not inlined
-#pragma warning(disable: 4711) // function '...' selected for automatic inline expansion
-#pragma warning(disable: 4820) // '...' bytes padding added after data member '...'
-#pragma warning(disable: 4996) // The POSIX name for this item is deprecated.
-#pragma warning(disable: 5045) // Compiler will insert Spectre mitigation
-#pragma warning(disable: 4820) // bytes padding added after data member
-#endif
-
 #include "sqz/sqz.h"
 
 #ifndef assert // allows to overide assert in single header lib
@@ -132,370 +111,107 @@ static_assert(sizeof(int) >= 4, "32 bits minimum"); // 16 bit int unsupported
 enum { sqz_min_len =   2 };
 enum { sqz_max_len = 254 };
 
-static void    map_init(struct sqz* s, struct map_entry entry[], size_t n);
-static int32_t map_get(const struct map* m, const void* data, uint32_t bytes);
-static int32_t map_put(struct sqz* s, const void* data, uint32_t bytes);
-static void    map_best(struct sqz* s, const void* data, size_t bytes,
-                        uint32_t* distance, uint8_t* size, uint32_t window);
-static void    map_remove(struct map* m, int32_t i);
-static void    map_clear(struct map *m);
-
-// map_put()  is no operation if map is filled to 75% or more
-// map_get()  returns index of matching entry or -1
-// map_best() returns distance and size for best match
-
-// FNV Fowler Noll Vo hash function
-// https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
-
-// FNV offset basis for 64-bit:
-static const uint64_t map_hash_init = 0xCBF29CE484222325;
-
-// FNV prime for 64-bit
-static const uint64_t map_prime64   = 0x100000001B3;
-
-static inline uint64_t map_hash64_byte(uint64_t hash, const uint32_t byte) {
-    return (hash ^ (uint64_t)byte) * map_prime64;
-}
-
-static inline uint64_t map_hash64(const uint8_t* data, size_t bytes) {
-    assert(2 <= bytes && bytes <= UINT32_MAX);
-    uint64_t hash = map_hash_init;
-    for (size_t i = 0; i < bytes; i++) {
-        hash = map_hash64_byte(hash, data[i]);
+static void map_init(struct map* m, void** p, size_t n, size_t b) {
+    assert(16 < n && n <= (1u << 24) && 3 <= b && b <= 4);
+    if ( !(16 < n && n <= (1u << 24) && 3 <= b && b <= 4) ) {
+        exit(1); // this is not a generic map implementation
     }
-    return hash;
+    memset(m, 0, sizeof(*m));
+    m->p = p;
+    m->n = n;
+    m->m = b == 3 ? 0x00FFFFFFu : 0xFFFFFFFFu;
+    memset(m->p, 0, n * sizeof(m->p[0]));
 }
 
-static void map_init(struct sqz* s, struct map_entry entry[], size_t n) {
-    assert(16 < n && n < UINT32_MAX);
-    struct map* m = &s->map;
-    m->entry = entry;
-    m->n = (int32_t)n;
-    memset(m->entry, 0, n * sizeof(m->entry[0]));
-    m->entries = 0;
-    m->max_chain = 0;
-    m->max_bytes = 0;
+static inline uint32_t map_hash_key(uint32_t k) {
+    k ^= k >> 13; // Bob Jenkins' hash
+    k *= 0x85EBCA6Bu;
+    k ^= k >> 16;
+    return k;
 }
 
-static int32_t map_get_hashed(const struct map* m, uint64_t hash,
-                              const void* d, uint32_t b) {
-    assert(2 <= b);
-    const struct map_entry* entries = m->entry;
-    size_t i = (size_t)hash % m->n;
-    while (entries[i].bytes != 0) {
-        if (entries[i].bytes == (int32_t)b && entries[i].hash == hash &&
-            memcmp(entries[i].data, d, b) == 0) {
-            return (int32_t)i;
-        }
-        i = (i + 1) % m->n;
-    }
-    return -1;
+static inline size_t map_hash(struct map* m, uint32_t k) {
+    return (size_t)(map_hash_key(k) % m->n);
 }
 
-static int32_t map_get(const struct map* m, const void* d, uint32_t b) {
-    return map_get_hashed(m, map_hash64(d, b), d, b);
-}
-
-static void map_remove(struct map* m, int32_t i) {
-    assert(m->entry[i].bytes > 0 && m->entries > 0);
-    m->entry[i].bytes = -1;
-    m->entry[i].data = null;
-    m->entries--;
-}
-
-static int32_t map_put(struct sqz* s, const void* data, uint32_t b) {
-    const uint8_t* d = (const uint8_t*)data;
-    struct map* m = &s->map;
-    enum { max_bytes = sizeof(m->entry[0]) - 1 };
-    assert(2 <= b && b <= UINT32_MAX);
-    if (m->entries < m->n * 3 / 4) {
-        struct map_entry* entries = m->entry;
-        uint64_t hash = map_hash64(d, b);
-        size_t i = (size_t)hash % m->n;
-        uint32_t chain = 0; // max chain length
-        while (entries[i].bytes != 0) {
-            if (entries[i].bytes == (int32_t)b && entries[i].hash == hash &&
-                memcmp(entries[i].data, d, b) == 0) {
-                assert(d >= entries[i].data); // shorter distance
-                entries[i].data = d; // update to shorter distance
-                return (int32_t)i;   // found match with existing entry
-            }
-            chain++;
+static inline bool map_get(struct map* m, uint32_t k,
+                                  const size_t s, size_t* ix) {
+    size_t i = s; // start
+    const uint32_t mask = m->m;
+    while (m->p[i]) {
+        if ((mask & *((uint32_t*)m->p[i])) == k) {
+            *ix = i;
+            return true;
+        } else {
             i = (i + 1) % m->n;
-            assert(chain < m->n); // looping endlessly?
+            if (i == s) { return false; }
         }
-        if (chain > m->max_chain) { m->max_chain = chain; }
-        if (b > m->max_bytes) { m->max_bytes = b; }
-        entries[i].data = d;
-        entries[i].hash = hash;
-        entries[i].bytes = b;
-        m->entries++;
-        return (int32_t)i;
     }
-    return -1;
+    return false;
 }
 
-static void map_best(struct sqz* s, const void* data, size_t bytes,
-                     uint32_t* distance, uint8_t* size, uint32_t max_distance) {
-    *size = 0;
-    *distance = 0;
-    struct map* m = &s->map;
-    const uint8_t* d = (uint8_t*)data;
-    int32_t best = -1; // best (longest) result
-    if (bytes >= sqz_min_len) {
-        const uint32_t b = (uint32_t)(bytes < UINT32_MAX ? bytes : UINT32_MAX);
-        uint64_t hash = map_hash64_byte(map_hash_init, d[0]);
-        hash = map_hash64_byte(hash, d[1]);
-        for (uint8_t i = 2; i < b - 1; i++) {
-            hash = map_hash64_byte(hash, d[i]);
-            int32_t r = map_get_hashed(m, hash, data, i + 1);
-            if (r != -1 && (size_t)(d - m->entry[r].data) >= max_distance) {
-                map_remove(m, r);
-            } else if (r != -1) {
-                best = r;
-            } else {
-                break;
-            }
-        }
-    }
-    if (best >= 0) {
-        *distance = (uint32_t)(d - m->entry[best].data);
-        assert(*distance < max_distance);
-        uint32_t b = m->entry[best].bytes;
-        const uint8_t* p0 = m->entry[best].data + b;
-        const uint8_t* p1 = d + b;
-        const uint8_t* pe = d + bytes;
-        uint32_t ex = b;
-        while (p1 < pe && *p0 == *p1 && ex < sqz_max_len) {
-            ex++;
-            p0++;
-            p1++;
-        }
-        assert(ex <= sqz_max_len);
-        *size = (uint8_t)ex;
-        if (ex != b) {
-            assert(memcmp(m->entry[best].data, d, ex) == 0);
-            printf("[%d] best_bytes: %d extended to: %d\n", best, b, ex);
-            map_put(s, d, ex);
+static inline void map_remove(struct map* m, size_t i) {
+    m->p[i] = 0;
+    size_t x = i; // next
+    for (;;) {
+        x = (x + 1) % m->n;
+        if (!m->p[x]) { break; }
+        const uint32_t b4 = *(uint32_t*)m->p[x];
+        size_t h = map_hash(m, b4 & m->m);
+        // Check if `h` lies within [i, x), accounting for wrap-around:
+        const bool can_move = i <= x ? x < h || h <= i :
+                                       x < h && h <= i;
+        if (can_move) {
+            m->p[i] = m->p[x];
+            m->p[x] = 0;
+            i = x;
         }
     }
 }
 
-static void map_clear(struct map *m) {
-    memset(m->entry, 0, m->n * sizeof(m->entry[0]));
-    m->entries = 0;
-    m->max_chain = 0;
-    m->max_bytes = 0;
-}
-
-#if 0
-static void pretty_print(struct tree_node* node, size_t indent) {
-    if (!node) return;
-    for (size_t i = 0; i < indent; i++) printf("  ");
-    printf("Node '%s':%zu\n", node->data, node->dist);
-    pretty_print(node->ln, indent + 1);
-    pretty_print(node->rn, indent + 1);
-}
-
-static void tree_init(struct tree* t) {
-    t->used = 0;
-    t->root = NULL;
-    t->free_list = NULL;
-}
-
-static struct tree_node* tree_alloc(struct tree* t) {
-    if (t->free_list == NULL) {
-        if (t->used >= sizeof(t->nodes) / sizeof(t->nodes[0])) {
-            printf("Tree pool overflow %u\n",
-                   sizeof(t->nodes) / sizeof(t->nodes[0]));
-            return NULL;
-        }
-        return &t->nodes[t->used++];
-    } else {
-        struct tree_node* n = t->free_list;
-        t->free_list = t->free_list->rn;
-        return n;
-    }
-}
-
-static inline void tree_free(struct tree* t, struct tree_node* n) {
-    n->rn = t->free_list;
-    t->free_list = n;
-}
-
-static inline int tree_node_height(struct tree_node* n) {
-    return n != NULL ? n->height : 0;
-}
-
-static inline int tree_balance_factor(struct tree_node* n) {
-    return n != NULL ?
-        tree_node_height(n->ln) - tree_node_height(n->rn) : 0;
-}
-
-static inline void tree_update_height(struct tree_node* n) {
-    if (n != NULL) {
-        n->height =
-            1 + (tree_node_height(n->ln) > tree_node_height(n->rn) ?
-                 tree_node_height(n->ln) : tree_node_height(n->rn));
-    }
-}
-
-static size_t tree_node_count(struct tree_node* n) {
-    return n == NULL ? 0 :
-        1 + tree_node_count(n->ln) + tree_node_count(n->rn);
-}
-
-static inline struct tree_node* tree_rotate_right(struct tree_node* y) {
-    struct tree_node* x = y->ln; y->ln = x->rn; x->rn = y;
-    tree_update_height(y);
-    tree_update_height(x);
-    return x;
-}
-
-static inline struct tree_node* tree_rotate_left(struct tree_node* x) {
-    struct tree_node* y = x->rn; x->rn = y->ln; y->ln = x;
-    tree_update_height(x);
-    tree_update_height(y);
-    return y;
-}
-
-static struct tree_node* tree_balance(struct tree_node* n) {
-    tree_update_height(n);
-    int balance = tree_balance_factor(n);
-    if (balance > 1) {
-        if (tree_balance_factor(n->ln) < 0) {
-            n->ln = tree_rotate_left(n->ln);
-        }
-        return tree_rotate_right(n);
-    } else if (balance < -1) {
-        if (tree_balance_factor(n->rn) > 0) {
-            n->rn = tree_rotate_right(n->rn);
-        }
-        return tree_rotate_left(n);
-    }
-    return n;
-}
-
-static size_t evict_count;
-static size_t insert_count;
-
-static struct tree_node* leftmost(struct tree_node* n) {
-    while (n->ln != NULL) { n = n->ln; }
-    return n;
-}
-
-static struct tree_node* tree_evict(struct tree* t, struct tree_node* n,
-                                    size_t start) {
-    if (n != NULL) {
-        if (n->dist < start) {
-            evict_count++;
-            struct tree_node* s = n->rn != NULL ? n->rn : n->ln;
-            if (n->rn != NULL) { leftmost(s)->ln = n->ln; }
-            tree_free(t, n);
-            n = s;
+static inline bool map_put(struct map* m, const void* p,
+                      const size_t h, uint32_t k) {
+    const uint32_t mask = m->m;
+    size_t i = h;
+    while (m->p[i]) {
+        if ((mask & *((uint32_t*)m->p[i])) == k) {
+            m->p[i] = p;
+            return true;
         } else {
-            n->ln = tree_evict(t, n->ln, start);
-            n->rn = tree_evict(t, n->rn, start);
+            i = (i + 1) % m->n;
+            assert(i != h); // in the way map is used should not happen
+            if (i == h) { return false; }
         }
     }
-    return n != NULL ? tree_balance(n) : NULL;
+    m->p[i] = p;
+    return true;
 }
 
-static inline struct tree_node* tree_insert(struct tree* t,
-        struct tree_node* n, const uint8_t* p,
-        size_t maximum, size_t d) {
-    if (n == NULL) {
-        n = tree_alloc(t);
-        insert_count++;
-        if (n != NULL) {
-            n->data = p;
-            n->dist = d;
-            n->height = 1;
-            n->ln = n->rn = NULL;
-        }
-    } else {
-        int cmp = memcmp(p, n->data, maximum);
-        if (cmp < 0) {
-            n->ln = tree_insert(t, n->ln, p, maximum, d);
-        } else {
-            n->rn = tree_insert(t, n->rn, p, maximum, d);
-        }
-        n = tree_balance(n);
-    }
-    return n;
+static inline bool map_put3(struct map* m, const void* p, uint32_t b3) {
+    assert((b3 & ~0xFFFFFFu) == 0 && m->m == 0x00FFFFFFu);
+    return map_put(m, p, map_hash(m, b3), b3);
 }
 
-static bool tree_find_recursive_debug;
-
-static void tree_find_recursive(struct tree_node* node, const uint8_t* p,
-                                size_t maximum,
-                                size_t* best_size, size_t* best_dist) {
-    if (tree_find_recursive_debug) {
-        printf("%.4s\n", p);
-    }
-    if (node != NULL) {
-        const uint8_t* s = p;
-        const uint8_t* d = node->data;
-        const uint8_t* e = d + maximum;
-        while (d < e && *d == *s) { d++; s++; }
-        const size_t size = d - node->data;
-        const size_t dist = p - node->data;
-        if (tree_find_recursive_debug) {
-            printf("Node: `%.16s...` .dist:%d %d:%d\n", node->data, node->dist, dist, size);
-        }
-        if (size > *best_size) {
-//          printf("New best match dist:size %u:%u := %u:%u\n", (uint32_t)*best_dist,
-//                  (uint32_t)*best_size, (uint32_t)size, (uint32_t)dist);
-            *best_size = size;
-            *best_dist = dist;
-        } else if (size > 0 && size == *best_size) {
-            if (dist < *best_dist) {
-//              printf("Improved match dist:size %u:%u := %u\n", (uint32_t)*best_dist,
-//                      (uint32_t)*best_size, (uint32_t)dist);
-                *best_dist = dist;
-            }
-        }
-#if 0
-        if (*best_size < max_size && d < e) {
-            int compare = ((int8_t)*s) - ((int8_t)*d);
-            assert(compare != 0);
-            bool left = compare < 0 ||
-                *best_size > 0 && node->ln != NULL &&
-                (size_t)(p - node->ln->data) < *best_dist &&
-                memcmp(node->ln->data, p, *best_size) == 0;
-            bool right = compare > 0 ||
-               *best_size > 0 && node->rn != NULL &&
-                (size_t)(p - node->rn->data) < *best_dist &&
-                memcmp(node->rn->data, p, *best_size) == 0;
-            if (left) {
-                if (tree_find_recursive_debug) printf("Left\n");
-                tree_find_recursive(node->ln, p, maximum, best_size, best_dist);
-            }
-            if (right) {
-                if (tree_find_recursive_debug) printf("Right\n");
-                tree_find_recursive(node->rn, p, maximum, best_size, best_dist);
-            }
-        }
-#endif
-        if (*best_size < sqz_max_len) {
-            tree_find_recursive(node->ln, p, maximum, best_size, best_dist);
-            tree_find_recursive(node->rn, p, maximum, best_size, best_dist);
-        }
-    }
+static inline bool map_put4(struct map* m, const void* p, uint32_t b4) {
+    assert(m->m == 0xFFFFFFFFu);
+    return map_put(m, p, map_hash(m, b4), b4);
 }
 
-static inline void tree_find(struct tree* t, const uint8_t* p,
-                             size_t maximum, size_t* size, size_t* distance) {
-    *size = 0;
-    *distance = 0;
-    tree_find_recursive(t->root, p, maximum, size, distance);
+static inline bool map_get3(struct map* m, uint32_t b3, size_t* ix) {
+    assert((b3 & ~0xFFFFFFu) == 0 && m->m == 0x00FFFFFFu);
+    return map_get(m, b3, map_hash(m, b3), ix);
 }
-#endif
+
+static inline bool map_get4(struct map* m, uint32_t b4, size_t* ix) {
+    assert(m->m == 0xFFFFFFFFu);
+    return map_get(m, b4, map_hash(m, b4), ix);
+}
 
 static inline uint8_t sqz_bits_of(uint32_t i) {
-    uint8_t bits = 0;
-    while (i > 0) { i >>= 1; bits++; }
-    return bits;  // 0 bits for i == 0
+    return 32 - rt_count_leading_zeros(i);
+//  uint8_t bits = 0;
+//  while (i > 0) { i >>= 1; bits++; }
+//  return bits;  // 0 bits for i == 0
 }
 
 static inline int32_t ft_lsb(int32_t i) { // least significant bit only
@@ -650,7 +366,7 @@ static uint8_t rc_decode(struct range_coder* rc, struct prob_model* pm) {
     return (uint8_t)sym;
 }
 
-void sqz_init(struct sqz* s, struct map_entry entry[], size_t n) {
+void sqz_init(struct sqz* s) {
     rc_init(&s->rc, 0);
     pm_init(&s->pm_literal, 2);
     pm_init(&s->pm_size, 256);
@@ -659,238 +375,187 @@ void sqz_init(struct sqz* s, struct map_entry entry[], size_t n) {
     for (size_t b = 0; b < countof(s->pm_dist); b++) {
         pm_init(&s->pm_dist[b], 2);
     }
-    if (entry != null) {
-        map_init(s, entry, n);
-    } else {
-        memset(&s->map, 0, sizeof(s->map));
-    }
-//  tree_init(&s->tree);
+    // TODO: skip maps init for decompress - not used
+    //       may as well have separate decompressor type
+    memset(s->prev, 0, sizeof(s->prev));
+    memset(s->map2, 0, sizeof(s->map2));
+    map_init(&s->map3, s->map3e, sizeof(s->map3e) / sizeof(s->map3e[0]), 3);
+    map_init(&s->map4, s->map4e, sizeof(s->map4e) / sizeof(s->map4e[0]), 4);
 }
 
-#define SQUEEZE_MAP_STATS
-
-#ifdef SQUEEZE_MAP_STATS
-
-static double sqz_entropy(uint64_t* freq, size_t n) { // Shannon entropy
-    double total = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (freq[i] > 1) {
-            total += (double)freq[i];
+static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
+                       const size_t w, const size_t i, uint32_t incoming,
+                       uint32_t leaving) {
+    assert(sqz_min_window <= w && w <= sqz_max_window);
+    assert(((w - 1) & w) == 0); // window is power of 2
+    if (i < n - 4) {
+        bool b;
+        if (i >= w) {
+            const uint32_t w4 = leaving;
+            size_t ix;
+            b = map_get3(&s->map3, w4 & 0xFFFFFF, &ix);
+            if (b && (uint8_t*)s->map3.p[ix] <= in + i - w) {
+                map_remove(&s->map3, ix);
+            }
+            b = map_get4(&s->map4, w4, &ix);
+            if (b && (uint8_t*)s->map4.p[ix] <= in + i - w) {
+                map_remove(&s->map4, ix);
+            }
         }
-    }
-    double e = 0.0;
-    for (size_t i = 0; i < n; i++) {
-        if (freq[i] > 1) {
-            double p_i = (double)freq[i] / total;
-            e -= p_i * log2(p_i);
+        const uint32_t b4 = incoming;
+        b = map_put3(&s->map3, in + i, b4 & 0x00FFFFFFu);
+        assert(b);
+        size_t pp = 0; // previous position of 4 bytes entry
+        size_t ix;
+        bool seen = map_get4(&s->map4, b4, &ix);
+        if (!seen) {
+            b = map_put4(&s->map4, in + i, b4);
+            assert(b);
+        } else {
+            pp = (const uint8_t*)s->map4.p[ix] - in;
+            s->map4.p[ix] = in + i;
         }
+        const size_t index = i % w;
+        if (!seen) {
+            s->prev[index] = 0;
+        } else {
+            // `i`, `pp` and `w` are unsigned,
+            // if `i` may is less than `w` pp <= i - w is incorrect
+            if (i <= w || i - w <= pp && pp < i) {
+                s->prev[index] = i - pp;
+            } else {
+                s->prev[index] = 0;
+            }
+        }
+        s->map2[ b4 & 0xFFFFu] = i + 1;
     }
-    return e;
 }
 
-#endif
+// both lz_find and lz_linear function search longest match
+// at a shortest distance from position `i` and return
+// ml: [2..max_len] inclusive
+// md: [1..window] inclusive
+
+static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
+                            const size_t w, const size_t i,
+                            uint32_t incoming,
+                            size_t *ml, size_t *md) {
+    assert(sqz_min_window <= w && w <= sqz_max_window);
+    assert(((w - 1) & w) == 0); // window is power of 2
+    assert(*ml == 0); // caller's responsibility
+    assert(*md == 0);
+    size_t len = 0;
+    size_t dst = 0;
+    const uint32_t b4 = incoming;
+    size_t p;
+    size_t ix;
+    bool b = map_get4(&s->map4, b4, &ix);
+    if (b) {
+        p = (const uint8_t*)s->map4.p[ix] - in;
+        size_t max_k = n - i > sqz_max_len ? sqz_max_len : n - i;
+        size_t k = 4; // start with at least 4
+        while (k < max_k && in[p + k] == in[i + k]) { k++; }
+        if (i - p <= w) { len = k; dst = i - p; }
+        size_t index = p & (w - 1); // same as p % w for w = 2^x
+        size_t d = s->prev[index];
+        size_t prev_chain = 0;
+        while (len < sqz_max_len && 0 < d && d <= p && p - d < i && i <= p - d + w) {
+            p -= d;
+            if (len == 4 || memcmp(in + p + 4, in + i + 4, len - 4) == 0) {
+                k = len; // because with `len` bytes are the same
+                while (k < max_k && in[p + k] == in[i + k]) { k++; }
+                if (k > len) { len = k; dst = i - p; }
+            }
+            index = p & (w - 1); // same as p % w for w = 2^x
+            d = s->prev[index];
+            prev_chain++;
+        }
+    }
+    if (len == 0) {
+        b = map_get3(&s->map3, b4 & 0xFFFFFF, &ix);
+        if (b) {
+            p = (const uint8_t*)s->map3.p[ix] - in;
+            if (i - p <= w) { len = 3; dst = i - p; }
+        }
+    }
+    if (len == 0) {
+        p = s->map2[b4 & 0xFFFF];
+        if (p > 0) {
+            p--; // because map2[] keep position + 1
+            if (i - p <= w) { len = 2; dst = i - p; }
+        }
+    }
+    if (len > 0) {
+        *ml = len;
+        *md = dst;
+    }
+}
+
+#define sqz_update_incoming_leaving(incoming, leaving, in, i, w) do {       \
+    incoming = (incoming >> 8) | (((uint32_t)in[(i) + 3]) << 24);           \
+    if (i > w) {                                                            \
+        leaving  = (leaving  >> 8) | (((uint32_t)in[(i) - (w) + 3]) << 24); \
+    }                                                                       \
+} while (0)
+
+#define sqz_insert_next(s, in, n, w, i, len, incoming, leaving) do { \
+    const size_t next_i = i + ((len) > 0 ? (len) : 1);               \
+    while (i < next_i) {                                             \
+        sqz_insert(s, in, n, w, i, incoming, leaving);               \
+        i++;                                                         \
+        sqz_update_incoming_leaving(incoming, leaving, in, i, w);    \
+    }                                                                \
+} while (0)
 
 void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t window) {
-s->map.n = 0;
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (bytes > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
         s->rc.error = E2BIG;
         return;
     }
-    const uint8_t* d = (const uint8_t*)memory;
-    size_t i = 0;
-    #ifdef SQUEEZE_MAP_STATS
-        static double   map_distance_sum;
-        static double   map_len_sum;
-        static uint64_t map_count;
-        map_distance_sum = 0;
-        map_len_sum = 0;
-        map_count = 0;
-        size_t br_bytes   = 0; // source bytes encoded as back references
-        size_t li_bytes   = 0; // source bytes encoded "as is" literals
-        size_t rejections = 0; // count of rejected back references
-        static size_t size_histogram[256];
-        static size_t distance_bits_histogram[32];
-        memset(distance_bits_histogram, 0, sizeof(distance_bits_histogram));
-        memset(size_histogram, 0, sizeof(size_histogram));
-    #endif
-    while (i < bytes && s->rc.error == 0) {
-//      const size_t maximum = bytes - i < sqz_max_len ? bytes - i : sqz_max_len;
-        uint8_t  map_size = 0;
-        uint32_t map_dist = 0;
-        if (s->map.n > 0) {
-            // Use map_best() before O(n²) LZ search
-            map_best(s, d + i, bytes - i, &map_dist, &map_size, window);
-            if (map_size >= sqz_min_len) {
-                #ifdef SQUEEZE_MAP_STATS
-                    map_distance_sum += map_dist;
-                    map_len_sum += map_size;
-                    map_count++;
-                #endif
-            }
-        }
-
-#undef  SQZ_NO_COMPARE_TO_LZ77
-#define SQZ_NO_COMPARE_TO_LZ77
-
-#ifndef SQZ_NO_COMPARE_TO_LZ77
-        uint8_t  lz77_size = map_size;
-        uint32_t lz77_dist = map_dist;
-        // Perform O(n²) LZ search only if map_best() didn't find a match
-        if (map_size < sqz_min_len && i >= 1) {
-            size_t j = i - 1;
-            size_t min_j = i >= window ? i - window + 1 : 0;
-            for (;;) {
-                const size_t n = bytes - i;
-                size_t k = 0;
-                while (k < n && d[j + k] == d[i + k] && k < sqz_max_len) {
-                    k++;
-                }
-                if (k >= sqz_min_len && k > lz77_size) {
-                    lz77_size = (uint8_t)k;
-                    lz77_dist = (uint32_t)(i - j);
-                    if (lz77_size == sqz_max_len) break;
-                }
-                if (j == min_j) break;
-                j--;
-            }
-        }
-#endif
-        assert(sqz_max_len < window);
-        size_t best_dist = 0;
-        size_t best_size = 0;
-//      tree_find_recursive_debug = i == 69;
-//      tree_find(&s->tree, d + i, maximum, &best_size, &best_dist);
-#ifndef SQZ_NO_COMPARE_TO_LZ77
-        if (lz77_size >= sqz_min_len || best_size >= sqz_min_len) {
-            if (lz77_size != best_size || lz77_dist != best_dist) {
-                const uint8_t* match0 = d + i - best_dist;
-                printf("[%zu] %5u:%3d tree `%.*s`\n", i, best_dist, best_size, (int)best_size, match0);
-                swear(memcmp(match0, d + i, best_size) == 0);
-                const uint8_t* match1 = d + i - lz77_dist;
-                printf("[%zu] %5u:%3d lz77 `%.*s\n`", i, lz77_dist, lz77_size, (int)lz77_size, match1);
-                swear(memcmp(match1, d + i, lz77_size) == 0);
-                printf("[%zu] %5u:%3u tree %5u:%3u lz77\n", i,
-                       best_dist, best_size, lz77_dist, lz77_size);
-                pretty_print(s->tree.root, 0);
-                swear(lz77_size == best_size && lz77_dist == best_dist);
-            }
-        }
-#endif
+    const uint8_t* in = (const uint8_t*)memory;
+    assert(bytes >= 4);
+    assert(sqz_min_window <= window && window <= sqz_max_window);
+    uint32_t incoming = *(uint32_t*)in;
+    uint32_t leaving = incoming;
+    sqz_insert(s, in, bytes, window, 0, incoming, leaving);
+    size_t i = 1;
+    sqz_update_incoming_leaving(incoming, leaving, in, 1, window);
+    const size_t n4 = bytes - 4;
+    while (i < n4) {
+        size_t len = 0;
+        size_t dist = 0;
+        sqz_find(s, in, bytes, window, i, incoming, &len, &dist);
         // reject back references that take too much compressed space:
-        uint8_t bits = sqz_bits_of((uint32_t)best_dist);
-        if (best_size <= 3 && bits > 3) {
-            best_size = 0;
-            best_dist = 0;
-            #ifdef SQUEEZE_MAP_STATS
-            rejections++;
-            #endif
+        uint8_t bits = sqz_bits_of((uint32_t)dist);
+        if (len <= 3 && bits > 3) {
+            len = 0;
+            dist = 0;
         }
-//      printf("[%zu] insert('%.*s' %zu)\n", i, (int)(bytes - i), d + i, i);
-        if (best_size >= sqz_min_len) {
+        if (len >= sqz_min_len) {
             rc_encode(&s->rc, &s->pm_literal, 0);
-            rc_encode(&s->rc, &s->pm_size, (uint8_t)best_size);
+            rc_encode(&s->rc, &s->pm_size, (uint8_t)len);
             rc_encode(&s->rc, &s->pm_bits, bits);
-            #ifdef SQUEEZE_MAP_STATS
-            size_histogram[best_size]++;
-            #endif
-            uint32_t distance = (uint32_t)best_dist;
+            uint32_t distance = (uint32_t)dist;
             for (int b = 0; b < bits - 1; b++) {
                 rc_encode(&s->rc, &s->pm_dist[b], distance & 0x1);
                 distance >>= 1;
             }
-            if (s->map.n > 0) { map_put(s, d + i, (uint32_t)best_size); }
-            size_t next = i + best_size;
-            while (i < next) {
-//              s->tree.root = tree_insert(&s->tree, s->tree.root,
-//                                         d + i, maximum, i);
-                i++;
-                if (i < bytes) {
-//                  size_t start = (i >= window) ? i - window + 1 : 0;
-//                  printf("[%u] tree_evict(start: %u)\n", i, start);
-//                  s->tree.root = tree_evict(&s->tree, s->tree.root, start);
-                }
-            }
-            #ifdef SQUEEZE_MAP_STATS
-                br_bytes += best_size;
-                if (best_dist > 0) {
-                    distance_bits_histogram[bits]++;
-                }
-            #endif
         } else {
-            #ifdef SQUEEZE_MAP_STATS
-                li_bytes++;
-            #endif
             // Otherwise encode literal byte
             rc_encode(&s->rc, &s->pm_literal, 1);
-            rc_encode(&s->rc, &s->pm_byte, d[i]);
-#if 0 // makes it worse
-            if (s->map.n > 0 && i >= sqz_min_len) {
-                if (i + 1 < bytes) { map_put(s, d + i, 2); }
-                if (i + 2 < bytes) { map_put(s, d + i, 3); }
-                if (i + 3 < bytes) { map_put(s, d + i, 4); }
-            }
-#endif
-//          s->tree.root = tree_insert(&s->tree, s->tree.root,
-//                                     d + i, maximum, i);
-            i++;
-            if (i < bytes) {
-//              size_t start = (i >= window) ? i - window + 1 : 0;
-//              printf("[%u] tree_evict(start: %u)\n", i, start);
-//              s->tree.root = tree_evict(&s->tree, s->tree.root, start);
-            }
+            rc_encode(&s->rc, &s->pm_byte, in[i]);
         }
+        sqz_insert_next(s, in, bytes, window, i, len, incoming, leaving);
+    }
+    while (i < bytes) {
+        rc_encode(&s->rc, &s->pm_literal, 1);
+        rc_encode(&s->rc, &s->pm_byte, in[i]);
+        i++;
     }
     rc_encode(&s->rc, &s->pm_literal, 0);
     rc_encode(&s->rc, &s->pm_size, 0xFF);
     rc_flush(&s->rc);
-    #ifdef SQUEEZE_MAP_STATS
-        double br_percent = (100.0 * br_bytes) / (br_bytes + li_bytes);
-        double li_percent = (100.0 * li_bytes) / (br_bytes + li_bytes);
-        printf("literals: %.2f%% back references: %.2f%%\n", li_percent, br_percent);
-        printf("entropies: lit: %.2f byte: %.2f size: %.2f dist bits: %.2f",
-                sqz_entropy(s->pm_literal.freq, 256),
-                sqz_entropy(s->pm_byte.freq, 256),
-                sqz_entropy(s->pm_size.freq, 256),
-                sqz_entropy(s->pm_bits.freq, 256));
-        double h = 0;
-        for (int b = 0; b < 24; b++) {
-            double e = sqz_entropy(s->pm_dist[b].freq, 2);
-            printf(" %.2f", e);
-            h += e;
-        }
-        printf(" sum: %.2f\n", h);
-        if (map_count > 0) {
-            printf("avg dic distance: %.1f length: %.1f mapped count: %lld of %u\n",
-                    map_distance_sum / map_count,
-                    map_len_sum / map_count, map_count, s->map.n);
-            printf("map map.entries: %lld .max_bytes: %u .max_chain: %u\n",
-                    (uint64_t)s->map.entries, s->map.max_bytes, s->map.max_chain);
-        }
-        printf("rejections: %lld\n", (uint64_t)rejections);
-        double total = 0;
-        double cumulative = 0;
-        for (int j = 0; j < countof(distance_bits_histogram); j++) { total += distance_bits_histogram[j]; }
-        for (int j = 0; j < countof(distance_bits_histogram); j++) {
-            if (distance_bits_histogram[j] > 0) {
-                double p = (100.0 * distance_bits_histogram[j]) / total;
-                cumulative += p;
-                printf("distance_bits[%2d]: %7.3f%% %7.3f%%\n", j,
-                    p, cumulative);
-            }
-        }
-        total = 0;
-        cumulative = 0;
-        for (int j = 0; j < countof(size_histogram); j++) { total += size_histogram[j]; }
-        for (int j = 0; j < countof(size_histogram); j++) {
-            if (size_histogram[j] > 0) {
-                double p = (100.0 * size_histogram[j]) / total;
-                cumulative += p;
-//              printf("size[%2d]: %7.3f%% %7.3f%%\n", j,
-//                  p, cumulative);
-            }
-        }
-    #endif
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {

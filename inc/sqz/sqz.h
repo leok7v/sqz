@@ -6,7 +6,9 @@
 
 enum {
     sqz_min_win_bits  =  10,
-    sqz_max_win_bits  =  15
+    sqz_max_win_bits  =  16,
+    sqz_min_window    = 1u << sqz_min_win_bits,
+    sqz_max_window    = 1u << sqz_max_win_bits
 };
 
 // See: posix errno.h https://pubs.opengroup.org/onlinepubs/9699919799/
@@ -23,20 +25,6 @@ enum {
 // #define sqz_err_unsupported  40 // ENOSYS: Functionality not supported
 // #define sqz_err_no_space     55 // ENOBUFS: No buffer space available
 
-struct tree_node {
-    const  uint8_t*   data;
-    struct tree_node* ln;
-    struct tree_node* rn;
-};
-
-struct tree {
-    struct tree_node* root;
-    struct tree_node  nodes[(1u << sqz_max_win_bits)];
-    struct tree_node* free_list;
-    size_t used;
-};
-
-
 struct prob_model  { // probability model
     uint64_t freq[256];
     uint64_t tree[256]; // Fenwick Tree (aka BITS)
@@ -52,39 +40,39 @@ struct range_coder {
     int32_t  padding;
 };
 
-struct map_entry {
-    const uint8_t* data;
-    uint64_t hash;
-    int32_t  bytes; // 0 empty, -1 removed
-};
-
 struct map {
-    struct map_entry* entry;
-    uint32_t n;
-    uint32_t entries;
-    uint32_t max_chain;
-    uint32_t max_bytes;
+    const void** p; // p[n]
+    size_t       n; // number of entries in the map (max_window * 4)
+    uint32_t     m; // mask 0xFFFFFF for 3 bytes and 0xFFFFFFFFu for 4 bytes
+    uint32_t     padding; // shut up annoying compiler warning
 };
 
 struct sqz {
-    struct range_coder rc;
-    void*  that;                    // convenience for caller i/o override
-    struct tree        tree;
+    struct range_coder rc; // must be first field for callbacks
+    void*  that;    // convenience for caller i/o override
+    void*  padding; // padding for 32-bit compilers with 8 bytes allignment
     struct prob_model  pm_literal;  // 0..1
     struct prob_model  pm_size;     // size: 0..255
     struct prob_model  pm_byte;     // single byte
     struct prob_model  pm_bits;     // 0..31 number of bits in distance
     struct prob_model  pm_dist[32]; // 0..1 per bit distance probability
-    struct map         map;         // caller supplied memory for map
+    size_t prev[sqz_max_window];    // previous `i` of 4 bytes entry
+    size_t map2[((size_t)UINT16_MAX) + 1]; // `i` + 1 of 2 bytes
+    struct map map3;
+    struct map map4;
+    // entries for the maps (75% occupancy):
+    void* map3e[sqz_max_window + sqz_max_window / 2];
+    void* map4e[sqz_max_window + sqz_max_window / 2];
 };
 
-static_assert(offsetof(struct sqz, rc) == 0, "rc must be first field of sqz");
+// TODO: we need better range coder callback to remove this ugly requirement
+static_assert(offsetof(struct sqz, rc) == 0);
 
 #if defined(__cplusplus)
 extern "C" {
 #endif
 
-void     sqz_init(struct sqz* s, struct map_entry entry[], size_t n);
+void     sqz_init(struct sqz* s);
 void     sqz_compress(struct sqz* s, const void* d, size_t b, uint32_t window);
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes);
 

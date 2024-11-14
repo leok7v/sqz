@@ -364,22 +364,6 @@ static inline int debug_check_match(const uint8_t* in, size_t n, size_t w,
     #endif
 }
 
-#define update_incoming_leaving(incoming, leaving, in, i, w) do {           \
-    incoming = (incoming >> 8) | (((uint32_t)in[(i) + 3]) << 24);           \
-    if (i > w) {                                                            \
-        leaving  = (leaving  >> 8) | (((uint32_t)in[(i) - (w) + 3]) << 24); \
-    }                                                                       \
-} while (0)
-
-#define insert_next(ml1, update) do {                           \
-    size_t next_i = i + ((ml1) > 0 ? (ml1) : 1);                \
-    while (i < next_i) {                                        \
-        lz_insert(lz, in, n, w, i, incoming, leaving);          \
-        i++;                                                    \
-        update_incoming_leaving(incoming, leaving, in, i, w);   \
-    }                                                           \
-} while (0)
-
 enum { test_stats_count = 9 };
 
 static struct {
@@ -486,6 +470,22 @@ static inline void matches(void) {
     #endif
     printf("\n");
 }
+
+#define update_incoming_leaving(incoming, leaving, in, i, w) do {           \
+    incoming = (incoming >> 8) | (((uint32_t)in[(i) + 3]) << 24);           \
+    if (i > w) {                                                            \
+        leaving  = (leaving  >> 8) | (((uint32_t)in[(i) - (w) + 3]) << 24); \
+    }                                                                       \
+} while (0)
+
+#define insert_next(ml1, update) do {                           \
+    size_t next_i = i + ((ml1) > 0 ? (ml1) : 1);                \
+    while (i < next_i) {                                        \
+        lz_insert(lz, in, n, w, i, incoming, leaving);          \
+        i++;                                                    \
+        update_incoming_leaving(incoming, leaving, in, i, w);   \
+    }                                                           \
+} while (0)
 
 static int test(struct lz* lz, const uint8_t* in, const size_t n,
                 const size_t w, bool verbose) {

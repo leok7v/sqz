@@ -5,18 +5,12 @@
 #undef  SQUEEZE_MAX_WINDOW
 #define SQUEEZE_MAX_WINDOW
 
-#ifdef SQUEEZE_MAX_WINDOW // maximum window
 enum { window_bits = 16 };
-#elif defined(DEBUG) || defined(_DEBUG)
-enum { window_bits = 10 }; // 1KB
-#else
-enum { window_bits = 11 }; // 2KB
-#endif
 
-// window_bits = 15:
-// 4436173 -> 1451352 32.7% of "bible.txt"
+// window_bits = 16:
+// 4,436,173 -> 1,346,191 30.35% "bible.txt"
 // zip: (MS Windows)
-// 4436173 -> 1398871 31.5% of "bible.txt"
+// 4,436,173 -> 1,398,871 31.5%  "bible.txt"
 
 // Test is limited to "size_t" and "int" precision
 
@@ -62,11 +56,9 @@ static errno_t compress(const char* from, const char* to,
         return out.error;
     }
     static struct sqz encoder; // static for testing, can be heap malloc()-ed
-    static struct map_entry me[32 * 1024 * 1024];
     encoder.that = &out;
     encoder.rc.write = put;
-    sqz_init(&encoder, me, sizeof(me) / sizeof(me[0]));
-//  encoder.map.n = 0;
+    sqz_init(&encoder);
     write_header(&out, bytes);
     if (encoder.rc.error != 0) {
         printf("io_create(\"%s\") failed: %s\n", to, strerror(encoder.rc.error));
@@ -130,7 +122,7 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
     }
     uint64_t bytes = 0;
     static struct sqz decoder; // static to avoid >64KB stack warning
-    sqz_init(&decoder, null, 0);
+    sqz_init(&decoder);
     decoder.that = &in;
     decoder.rc.read = get;
     read_header(&in, &bytes);
@@ -246,10 +238,10 @@ int main(int argc, const char* argv[]) {
         "test/confucius.txt",
         "test/laozi.txt",
         "test/sqlite3.c",
-//      "test/arm64.elf",
-//      "test/x64.elf",
-//      "test/mandrill.bmp",
-//      "test/mandrill.png",
+        "test/arm64.elf",
+        "test/x64.elf",
+        "test/mandrill.bmp",
+        "test/mandrill.png",
     };
     for (int i = 0; i < sizeof(files)/sizeof(files[0]) && r == 0; i++) {
         if (file_exist(files[i])) {

@@ -112,6 +112,30 @@ int32_t rt_printf_implementation(const char* file, int32_t line,
 #define rt_assert(b, ...) ((void)(0))
 #endif
 
+#if defined(_MSC_VER)
+
+#include <intrin.h>
+
+#pragma intrinsic(_BitScanReverse)
+
+static inline uint8_t rt_count_leading_zeros(uint32_t x) {
+    if (x != 0) {
+        unsigned long index;
+        _BitScanReverse(&index, x);
+        return (uint8_t)(31 - index);
+    } else {
+        return 32;
+    }
+}
+
+#else
+
+static inline uint8_t rt_count_leading_zeros(uint32_t x) {
+    return x != 0 ? (uint8_t)__builtin_clz(x) : 32;
+}
+
+#endif
+
 
 #endif // rt_header_included
 
