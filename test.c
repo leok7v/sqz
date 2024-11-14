@@ -58,7 +58,7 @@ static errno_t compress(const char* from, const char* to,
     static struct sqz encoder; // static for testing, can be heap malloc()-ed
     encoder.that = &out;
     encoder.rc.write = put;
-    sqz_init(&encoder);
+    sqz_init(&encoder, true);
     write_header(&out, bytes);
     if (encoder.rc.error != 0) {
         printf("io_create(\"%s\") failed: %s\n", to, strerror(encoder.rc.error));
@@ -82,7 +82,7 @@ static errno_t compress(const char* from, const char* to,
         double bps = out.written * 8.0   / bytes; // bits per symbol
         printf("bps: %4.1f ", bps);
         if (from != null) {
-            printf("%7lld -> %7lld %6.2f%% of \"%s\"\n\n",
+            printf("%7lld -> %7lld %6.2f%% of \"%s\"\n",
                   (uint64_t)bytes, out.written, pc, fn);
         } else {
             printf("%7lld -> %7lld %6.2f%%\n\n",
@@ -122,7 +122,7 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
     }
     uint64_t bytes = 0;
     static struct sqz decoder; // static to avoid >64KB stack warning
-    sqz_init(&decoder);
+    sqz_init(&decoder, false);
     decoder.that = &in;
     decoder.rc.read = get;
     read_header(&in, &bytes);
@@ -164,6 +164,7 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
             }
             swear(same); // to trigger breakpoint while debugging
         }
+        swear(decoder.rc.error == 0);
     }
     io_close(&out);
     io_close(&in);
@@ -206,6 +207,7 @@ static errno_t locate_test_folder(void) {
     }
 }
 
+
 int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
     printf("Window: 2^%d %d sizeof(size_t): %d sizeof(int): %d\n",
@@ -243,7 +245,7 @@ int main(int argc, const char* argv[]) {
         "test/mandrill.bmp",
         "test/mandrill.png",
     };
-    for (int i = 0; i < sizeof(files)/sizeof(files[0]) && r == 0; i++) {
+    for (size_t i = 0; i < sizeof(files)/sizeof(files[0]) && r == 0; i++) {
         if (file_exist(files[i])) {
             r = test_compression(files[i]);
         }

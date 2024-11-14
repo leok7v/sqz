@@ -3,12 +3,15 @@
 #ifndef assert // allows to overide assert in single header lib
 #include <assert.h>
 #endif
-#include <math.h>
-#include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#include "rt/ustd.h"               // TODO: remove
+#ifdef _MSC_VER // overzealous /Wall in cl.exe compiler:
+#pragma warning(disable: 4710) // '...': function not inlined
+#pragma warning(disable: 4711) // function '...' selected for automatic inline expansion
+#pragma warning(disable: 5045) // Compiler will insert Spectre mitigation
+#endif
 
 static_assert(sizeof(int) >= 4, "32 bits minimum"); // 16 bit int unsupported
 
@@ -115,13 +118,6 @@ static inline bool map_get4(struct map* m, uint32_t b4, size_t* ix) {
     return map_get(m, b4, map_hash(m, b4), ix);
 }
 
-static inline uint8_t sqz_bits_of(uint32_t i) {
-    return 32 - rt_count_leading_zeros(i);
-//  uint8_t bits = 0;
-//  while (i > 0) { i >>= 1; bits++; }
-//  return bits;  // 0 bits for i == 0
-}
-
 static inline int32_t ft_lsb(int32_t i) { // least significant bit only
     return i & (~i + 1); // (i & -i)
 }
@@ -191,7 +187,7 @@ void pm_init(struct prob_model* pm, uint32_t n) {
 }
 
 void pm_update(struct prob_model* pm, uint8_t sym, uint64_t inc) {
-    const uint64_t pm_max_freq = (1uLL << (64 - 8));
+    static const uint64_t pm_max_freq = (1uLL << (64 - 8));
     if (pm->tree[countof(pm->tree) - 1] < pm_max_freq) {
         pm->freq[sym] += inc;
         ft_update(pm->tree, countof(pm->tree), sym, inc);
@@ -217,7 +213,7 @@ void rc_init(struct range_coder* rc, uint64_t code) {
 }
 
 static void rc_flush(struct range_coder* rc) {
-    for (int i = 0; i < sizeof(rc->low); i++) {
+    for (size_t i = 0; i < sizeof(rc->low); i++) {
         rc->range = UINT64_MAX;
         rc_emit(rc);
     }
@@ -274,21 +270,24 @@ static uint8_t rc_decode(struct range_coder* rc, struct prob_model* pm) {
     return (uint8_t)sym;
 }
 
-void sqz_init(struct sqz* s) {
+void sqz_init(struct sqz* s, bool compress) {
     rc_init(&s->rc, 0);
-    pm_init(&s->pm_literal, 2);
+    pm_init(&s->pm_bit0, 2);
+    pm_init(&s->pm_bit1, 2);
+    pm_init(&s->pm_bit2, 2);
+    pm_init(&s->pm_bit3, 2);
     pm_init(&s->pm_size, 256);
     pm_init(&s->pm_byte, 256);
-    pm_init(&s->pm_bits, 32);
-    for (size_t b = 0; b < countof(s->pm_dist); b++) {
-        pm_init(&s->pm_dist[b], 2);
+    pm_init(&s->pm_l2d,  8);
+    pm_init(&s->pm_lsb,  256);
+    pm_init(&s->pm_msb,  256);
+    // TODO: may as well have separate compressor/decompressor types
+    if (compress) {
+        memset(s->prev, 0, sizeof(s->prev));
+        memset(s->map2, 0, sizeof(s->map2));
+        map_init(&s->map3, s->map3e, sizeof(s->map3e) / sizeof(s->map3e[0]), 3);
+        map_init(&s->map4, s->map4e, sizeof(s->map4e) / sizeof(s->map4e[0]), 4);
     }
-    // TODO: skip maps init for decompress - not used
-    //       may as well have separate decompressor type
-    memset(s->prev, 0, sizeof(s->prev));
-    memset(s->map2, 0, sizeof(s->map2));
-    map_init(&s->map3, s->map3e, sizeof(s->map3e) / sizeof(s->map3e[0]), 3);
-    map_init(&s->map4, s->map4e, sizeof(s->map4e) / sizeof(s->map4e[0]), 4);
 }
 
 static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
@@ -422,8 +421,12 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
         return;
     }
     const uint8_t* in = (const uint8_t*)memory;
-    assert(bytes >= 4);
     assert(sqz_min_window <= window && window <= sqz_max_window);
+    if (bytes > 0) {
+        rc_encode(&s->rc, &s->pm_bit0, 1);
+        rc_encode(&s->rc, &s->pm_byte, in[0]);
+    }
+    size_t rejected = 0;
     uint32_t incoming = *(uint32_t*)in;
     uint32_t leaving = incoming;
     sqz_insert(s, in, bytes, window, 0, incoming, leaving);
@@ -434,36 +437,48 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
         size_t len = 0;
         size_t dist = 0;
         sqz_find(s, in, bytes, window, i, incoming, &len, &dist);
+        assert(dist == 0 || 1 <= dist && dist <= UINT16_MAX + 1);
         // reject back references that take too much compressed space:
-        uint8_t bits = sqz_bits_of((uint32_t)dist);
-        if (len <= 3 && bits > 3) {
+        if (len <= 3 && dist > 8) {
             len = 0;
             dist = 0;
+            rejected++;
         }
-        if (len >= sqz_min_len) {
-            rc_encode(&s->rc, &s->pm_literal, 0);
-            rc_encode(&s->rc, &s->pm_size, (uint8_t)len);
-            rc_encode(&s->rc, &s->pm_bits, bits);
-            uint32_t distance = (uint32_t)dist;
-            for (int b = 0; b < bits - 1; b++) {
-                rc_encode(&s->rc, &s->pm_dist[b], distance & 0x1);
-                distance >>= 1;
-            }
-        } else {
-            // Otherwise encode literal byte
-            rc_encode(&s->rc, &s->pm_literal, 1);
+        if (len == 0) {
+            // encode literal byte
+            rc_encode(&s->rc, &s->pm_bit0, 1);
             rc_encode(&s->rc, &s->pm_byte, in[i]);
+        } else if (len == 2) {
+            dist--; // 0..UINT16
+            assert(dist <= UINT16_MAX);
+            rc_encode(&s->rc, &s->pm_bit0, 0);
+            rc_encode(&s->rc, &s->pm_bit1, 0);
+            rc_encode(&s->rc, &s->pm_l2d, (uint8_t)dist);
+        } else {
+            dist--; // 0..UINT16
+            assert(dist <= UINT16_MAX);
+            assert(len >= 3);
+            rc_encode(&s->rc, &s->pm_bit0, 0);
+            rc_encode(&s->rc, &s->pm_bit1, 1);
+            rc_encode(&s->rc, &s->pm_size, (uint8_t)len);
+            rc_encode(&s->rc, &s->pm_bit2, (uint8_t)(dist >= 256));
+            rc_encode(&s->rc, &s->pm_lsb,  (uint8_t)(dist & 0xFF));
+            if (dist >= 256) {
+                rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
+            }
         }
         sqz_insert_next(s, in, bytes, window, i, len, incoming, leaving);
     }
     while (i < bytes) {
-        rc_encode(&s->rc, &s->pm_literal, 1);
+        rc_encode(&s->rc, &s->pm_bit0, 1);
         rc_encode(&s->rc, &s->pm_byte, in[i]);
         i++;
     }
-    rc_encode(&s->rc, &s->pm_literal, 0);
+    rc_encode(&s->rc, &s->pm_bit0, 0);
+    rc_encode(&s->rc, &s->pm_bit1, 1);
     rc_encode(&s->rc, &s->pm_size, 0xFF);
     rc_flush(&s->rc);
+    printf("rejected: %zu\n", rejected);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
@@ -474,27 +489,32 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
     uint8_t* d = (uint8_t*)data;
     size_t i = 0;
     while (s->rc.error == 0) {
-        uint8_t lit  = rc_decode(&s->rc, &s->pm_literal);
+        uint8_t bit0  = rc_decode(&s->rc, &s->pm_bit0);
         if (s->rc.error != 0) { break; }
-        if (lit) {
+        if (bit0) {
             if (i < bytes) {
                 d[i++] = rc_decode(&s->rc, &s->pm_byte);
             } else {
                 s->rc.error = ENOBUFS;
             }
         } else {
-            uint8_t size = rc_decode(&s->rc, &s->pm_size);
+            uint8_t bit1 = rc_decode(&s->rc, &s->pm_bit1);
+            uint8_t size = bit1 ? rc_decode(&s->rc, &s->pm_size) : 2;
             if (size == 0xFF) { break; } // end of stream
             if (size < sqz_min_len || size > sqz_max_len) {
                 s->rc.error = ERANGE;
             } else {
-                uint8_t bits = rc_decode(&s->rc, &s->pm_bits);
-                if (s->rc.error != 0) { break; }
                 uint32_t dist = 0;
-                for (int b = 0; b < bits - 1 && s->rc.error == 0; b++) {
-                    dist |= (uint32_t)rc_decode(&s->rc, &s->pm_dist[b]) << b;
+                if (size == 2) {
+                    dist = rc_decode(&s->rc, &s->pm_l2d);
+                } else {
+                    uint8_t bit2 = rc_decode(&s->rc, &s->pm_bit2);
+                    dist = rc_decode(&s->rc, &s->pm_lsb);
+                    if (bit2) {
+                        dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
+                    }
                 }
-                if (bits > 0) { dist |= (1u << bits); }
+                dist++;
                 if (s->rc.error == 0) {
                     const size_t n = i + size;
                     if (i < dist) {

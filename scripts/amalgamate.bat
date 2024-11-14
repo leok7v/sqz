@@ -9,6 +9,7 @@ if exist ..\shl (
         ::: LF
         echo.
         echo #ifdef sqz_implementation
+        echo #undef sqz_implementation
         type ..\src\sqz.c
         echo.
         echo #endif // sqz_implementation

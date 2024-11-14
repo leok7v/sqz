@@ -448,7 +448,7 @@ static inline void matches(void) {
     printf("per byte:  %7lld ", ts.bytes);
     const double b = (double)ts.bytes;
     p = 100.0 * (double)ts.sum[1] / b;
-    if (p >= 0.1) {
+    if (p >= 0.01) {
         printf("\"as is\" %.1f%% ", p);
     }
     for (size_t i = 2; i < n - 1; i++) {

@@ -4,18 +4,18 @@
 #include <stdio.h>
 #include <string.h>
 
-struct {
+static struct {
     uint8_t data[1024];
     size_t  written;
     size_t  bytes;
 } io;
 
-static void put(struct range_coder* rc, uint8_t b) {
+static void put_byte(struct range_coder* rc, uint8_t b) {
     (void)rc; // `rc` unused. No bounds check:
     io.data[io.written++] = b;
 }
 
-static uint8_t get(struct range_coder* rc) {
+static uint8_t get_byte(struct range_coder* rc) {
     (void)rc; // `rc` unused. No bounds check:
     return io.data[io.bytes++];
 }
@@ -30,8 +30,8 @@ static errno_t lorem_ipsum(void) {
         static struct sqz compress;
         compress.that = 0;
         assert(sizeof(io.data) > input_size * 2);
-        sqz_init(&compress);
-        compress.rc.write = put;
+        sqz_init(&compress, true);
+        compress.rc.write = put_byte;
         // window_bits: 11 (2KB)
         sqz_compress(&compress, text, input_size, 1u << 11);
         if (compress.rc.error != 0) {
@@ -45,8 +45,8 @@ static errno_t lorem_ipsum(void) {
         static char decompressed_data[1024];
         static struct sqz decompress;
         assert(sizeof(decompressed_data) > input_size);
-        sqz_init(&decompress);
-        decompress.rc.read = get;
+        sqz_init(&decompress, false);
+        decompress.rc.read = get_byte;
         uint64_t decompressed = sqz_decompress(&decompress, decompressed_data,
                                                input_size);
         if (decompress.rc.error != 0) {

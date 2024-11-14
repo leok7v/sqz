@@ -1,6 +1,7 @@
 #ifndef sqz_h
 #define sqz_h
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -51,11 +52,17 @@ struct sqz {
     struct range_coder rc; // must be first field for callbacks
     void*  that;    // convenience for caller i/o override
     void*  padding; // padding for 32-bit compilers with 8 bytes allignment
-    struct prob_model  pm_literal;  // 0..1
+    struct prob_model  pm_bit0;     // 0..1
+    struct prob_model  pm_bit1;     // 0..1
+    struct prob_model  pm_bit2;     // 0..1
+    struct prob_model  pm_bit3;     // 0..1
     struct prob_model  pm_size;     // size: 0..255
     struct prob_model  pm_byte;     // single byte
-    struct prob_model  pm_bits;     // 0..31 number of bits in distance
-    struct prob_model  pm_dist[32]; // 0..1 per bit distance probability
+    struct prob_model  pm_l2d;      // 0..7   len == 2 distance
+    struct prob_model  pm_lsb;      // 0..255 distance least significant byte
+    struct prob_model  pm_msb;      // 0..255 distance most  significant byte
+    // TODO: we may have 2 types decompressor and compressor
+    //       because decompress do not need maps
     size_t prev[sqz_max_window];    // previous `i` of 4 bytes entry
     size_t map2[((size_t)UINT16_MAX) + 1]; // `i` + 1 of 2 bytes
     struct map map3;
@@ -72,7 +79,7 @@ static_assert(offsetof(struct sqz, rc) == 0);
 extern "C" {
 #endif
 
-void     sqz_init(struct sqz* s);
+void     sqz_init(struct sqz* s, bool compress);
 void     sqz_compress(struct sqz* s, const void* d, size_t b, uint32_t window);
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes);
 
