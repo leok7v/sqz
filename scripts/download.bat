@@ -38,6 +38,94 @@ if not exist "the-analects-of-confucius.txt" ( :: "The Analects" by Confucius
     curl -LJO https://www.gutenberg.org/cache/epub/23839/pg23839.txt
     rename pg23839.txt the-analects-of-confucius.txt
 )
+
+if not exist corpus (
+    mkdir corpus 2>nul >nul
+)
+
+cd corpus
+
+if not exist "dickens.txt" ( :: Collected works of Charles Dickens Project Gutenberg
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/dickens
+    rename dickens dickens.txt
+)
+
+if not exist "mozilla.tar" ( :: Tarred executables of Mozilla 1.0 (Tru64 UNIX edition)
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/mozilla
+    rename mozilla mozilla.tar
+)
+
+if not exist "mr.dicom" ( :: Medical magnetic resonanse image 3-D MRI image, DICOM
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/mr
+    rename mr mr.dicom
+)
+
+if not exist "nci.txt" (
+    :: Chemical database of structures CACTVS Chemical Information Services at LMC/NCI
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/nci
+    rename nci nci.txt
+)
+
+if not exist "ooffice.dll" ( :: A dll from Open Office.org 1.01
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/ooffice
+    rename ooffice ooffice.dll
+)
+
+if not exist "os.db" (
+    :: Sample database in MySQL format from Open Source Database Benchmark
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/osdb
+    rename osdb os.db
+)
+
+if not exist "reymont.pdf" (
+    :: Polish text, uncompressed PDF Wladyslaw Reymont - Chłopi
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/reymont
+    rename reymont reymont.pdf
+)
+
+if not exist "samba.tar" ( :: Tarred source code of Samba 2-2.3
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/samba
+    rename samba samba.tar
+)
+
+if not exist "sao.bin" (
+    :: The SAO star catalog Astronomical Catalogs and Catalog Formats
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/sao
+    rename sao sao.bin
+)
+
+if not exist "webster.html" (
+    :: The 1913 Webster Unabridged Dictionary Project Gutenberg
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/webster
+    rename webster webster.html
+)
+
+if not exist "x-ray.dicom" ( :: X-ray medical picture 16 bit grayscale, DICOM
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/x-ray
+    rename x-ray x-ray.dicom
+)
+
+if not exist "xml.tar" (
+    :: Collected XML files XMLPPM: XML-Conscious PPM Compression
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/xml
+    rename xml xml.tar
+)
+
+if not exist "xml.tar" (
+    :: Collected XML files XMLPPM: XML-Conscious PPM Compression
+    curl -LJO https://github.com/leok7v/SilesiaCorpus/raw/refs/heads/master/xml
+    rename xml xml.tar
+)
+
+cd ..
+
+:: https://github.com/inikep/lzbench
+:: https://github.com/inikep/lzbench/blob/master/lzbench18_sorted.md
+
+if not exist "silesia.tar" (
+    powershell -Command "tar -cf silesia.tar corpus/"
+)
+
 popd
 
 :: *) Disney, the majority owner of Hulu, owns the rights to Adams' novels.

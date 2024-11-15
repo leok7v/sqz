@@ -298,11 +298,27 @@ int main(int argc, const char* argv[]) {
         "test/x64.elf",
         "test/mandrill.bmp",
         "test/mandrill.png",
+        "test/silesia.tar"
     };
     for (size_t i = 0; i < sizeof(files)/sizeof(files[0]) && r == 0; i++) {
-        if (file_exist(files[i])) {
-            r = test_compression(files[i]);
-        }
+        if (file_exist(files[i])) { r = test_compression(files[i]); }
+    }
+    static const char* corpus[] = {
+        "test/corpus/dickens.txt",
+        "test/corpus/mozilla.tar",
+        "test/corpus/mr.dicom",
+        "test/corpus/nci.txt",
+        "test/corpus/ooffice.dll",
+        "test/corpus/os.db",
+        "test/corpus/reymont.pdf",
+        "test/corpus/samba.tar",
+        "test/corpus/sao.bin",
+        "test/corpus/webster.html",
+        "test/corpus/x-ray.dicom",
+        "test/corpus/xml.tar",
+    };
+    for (size_t i = 0; i < sizeof(corpus)/sizeof(corpus[0]) && r == 0; i++) {
+        if (file_exist(corpus[i])) { r = test_compression(corpus[i]); }
     }
     return r;
 }
