@@ -63,7 +63,7 @@ static void dump_entropy(struct sqz* s) {
         pm_sum(&s->pm_bit3) +
         pm_sum(&s->pm_size) +
         pm_sum(&s->pm_byte) +
-        pm_sum(&s->pm_l2d ) +
+        pm_sum(&s->pm_l3d ) +
         pm_sum(&s->pm_lsb ) +
         pm_sum(&s->pm_msb );
     printf("entropy of: %lld\n",total);
@@ -78,7 +78,7 @@ static void dump_entropy(struct sqz* s) {
     print_entropy(pm_bit3);
     print_entropy(pm_size);
     print_entropy(pm_byte);
-    print_entropy(pm_l2d );
+    print_entropy(pm_l3d );
     print_entropy(pm_lsb );
     print_entropy(pm_msb );
     #pragma pop_macro("print_entropy")

@@ -233,6 +233,7 @@ static inline void rc_encode(struct range_coder* rc, struct prob_model* pm,
     uint64_t total = pm_total_freq(pm);
     uint64_t start = pm_sum_of(pm, sym);
     uint64_t size  = pm->freq[sym];
+    assert(size > 0);
     rc->range /= total;
     rc->low   += start * rc->range;
     rc->range *= size;
@@ -280,7 +281,7 @@ void sqz_init(struct sqz* s, bool compress) {
     pm_init(&s->pm_bit3, 2);
     pm_init(&s->pm_size, 256);
     pm_init(&s->pm_byte, 256);
-    pm_init(&s->pm_l2d,  8);
+    pm_init(&s->pm_l3d,  256);
     pm_init(&s->pm_lsb,  256);
     pm_init(&s->pm_msb,  256);
     // TODO: may as well have separate compressor/decompressor types
@@ -428,7 +429,8 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
         rc_encode(&s->rc, &s->pm_bit0, 1);
         rc_encode(&s->rc, &s->pm_byte, in[0]);
     }
-    size_t rejected = 0;
+    size_t rejected2 = 0;
+    size_t rejected3 = 0;
     uint32_t incoming = *(uint32_t*)in;
     uint32_t leaving = incoming;
     sqz_insert(s, in, bytes, window, 0, incoming, leaving);
@@ -440,22 +442,29 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
         size_t dist = 0;
         sqz_find(s, in, bytes, window, i, incoming, &len, &dist);
         assert(dist == 0 || 1 <= dist && dist <= UINT16_MAX + 1);
-        // reject back references that take too much compressed space:
-        if (len <= 3 && dist > 8) {
-            rejected++;
+        if (len == 2) {
+            // TODO: investigate and probably remove map2[] alltogether
+            rejected2++; // always reject 2 bytes matches
             len = 0;
             dist = 0;
         }
+        // reject back references that take too much compressed space:
+        if (len == 3 && dist >= 256) {
+            rejected3++;
+            len = 0;
+            dist = 0;
+        }
+        assert(len == 0 || len > 2);
         if (len == 0) {
             // encode literal byte
             rc_encode(&s->rc, &s->pm_bit0, 1);
             rc_encode(&s->rc, &s->pm_byte, in[i]);
-        } else if (len == 2) {
+        } else if (len == 3) {
             dist--; // 0..UINT16
-            assert(dist <= UINT16_MAX);
+            assert(dist <= 255);
             rc_encode(&s->rc, &s->pm_bit0, 0);
             rc_encode(&s->rc, &s->pm_bit1, 0);
-            rc_encode(&s->rc, &s->pm_l2d, (uint8_t)dist);
+            rc_encode(&s->rc, &s->pm_l3d, (uint8_t)dist);
         } else {
             dist--; // 0..UINT16
             assert(dist <= UINT16_MAX);
@@ -480,7 +489,7 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
     rc_encode(&s->rc, &s->pm_bit1, 1);
     rc_encode(&s->rc, &s->pm_size, 0xFF);
     rc_flush(&s->rc);
-    printf("rejected: %zu\n", rejected);
+    printf("rejected 2: %zu 3: %zu\n", rejected2, rejected3);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
@@ -501,14 +510,14 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
             }
         } else {
             uint8_t bit1 = rc_decode(&s->rc, &s->pm_bit1);
-            uint8_t size = bit1 ? rc_decode(&s->rc, &s->pm_size) : 2;
+            uint8_t size = bit1 ? rc_decode(&s->rc, &s->pm_size) : 3;
             if (size == 0xFF) { break; } // end of stream
             if (size < sqz_min_len || size > sqz_max_len) {
                 s->rc.error = ERANGE;
             } else {
                 uint32_t dist = 0;
-                if (size == 2) {
-                    dist = rc_decode(&s->rc, &s->pm_l2d);
+                if (size == 3) {
+                    dist = rc_decode(&s->rc, &s->pm_l3d);
                 } else {
                     uint8_t bit2 = rc_decode(&s->rc, &s->pm_bit2);
                     dist = rc_decode(&s->rc, &s->pm_lsb);
