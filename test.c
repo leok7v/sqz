@@ -31,6 +31,59 @@ static double entropy(uint64_t* freq, size_t n) { // Shannon entropy
     return e;
 }
 
+static size_t pm_n(struct prob_model* pm) {
+    size_t n = 0;
+    for (size_t i = 0; i < countof(pm->freq); i++) {
+        n += pm->freq[i] > 1;
+    }
+    return n;
+}
+
+static size_t pm_sum(struct prob_model* pm) {
+    size_t sum = 0;
+    for (size_t i = 0; i < countof(pm->freq); i++) {
+        if (pm->freq[i] > 1) { sum += pm->freq[i] - 1; }
+    }
+    return sum;
+}
+
+static double pm_percentage(struct prob_model* pm, size_t total) {
+    return 100.0 * pm_sum(pm) / (double)total;
+}
+
+static double pm_entropy(struct prob_model* pm) {
+    return entropy(pm->freq, pm_n(pm));
+}
+
+static void dump_entropy(struct sqz* s) {
+    size_t total =
+        pm_sum(&s->pm_bit0) +
+        pm_sum(&s->pm_bit1) +
+        pm_sum(&s->pm_bit2) +
+        pm_sum(&s->pm_bit3) +
+        pm_sum(&s->pm_size) +
+        pm_sum(&s->pm_byte) +
+        pm_sum(&s->pm_l2d ) +
+        pm_sum(&s->pm_lsb ) +
+        pm_sum(&s->pm_msb );
+    printf("entropy of: %lld\n",total);
+    #pragma push_macro("print_entropy")
+    #define print_entropy(field)                                    \
+        printf("%-7s[%3d]: %.2f bits %4.1f%% %9lld\n",   \
+        #field, pm_n(&s->field), pm_entropy(&s->field),             \
+        pm_percentage(&s->field, total), pm_sum(&s->field));
+    print_entropy(pm_bit0);
+    print_entropy(pm_bit1);
+    print_entropy(pm_bit2);
+    print_entropy(pm_bit3);
+    print_entropy(pm_size);
+    print_entropy(pm_byte);
+    print_entropy(pm_l2d );
+    print_entropy(pm_lsb );
+    print_entropy(pm_msb );
+    #pragma pop_macro("print_entropy")
+}
+
 static uint8_t squeeze_id[8] = { 's', 'q', 'u', 'e', 'e', 'z', 'e', '4' };
 
 static void write_header(struct io* io, uint64_t bytes) {
@@ -89,6 +142,7 @@ static errno_t compress(const char* from, const char* to,
                   (uint64_t)bytes, out.written, pc);
         }
     }
+    dump_entropy(&encoder);
     return encoder.rc.error;
 }
 

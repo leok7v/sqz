@@ -1,11 +1,14 @@
 #include "sqz/sqz.h"
 
+#include "rt/ustd.h" // Only for debugging convinient. TODO: remove me
+
 #ifndef assert // allows to overide assert in single header lib
 #include <assert.h>
 #endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 
 #ifdef _MSC_VER // overzealous /Wall in cl.exe compiler:
 #pragma warning(disable: 4710) // '...': function not inlined
@@ -46,7 +49,7 @@ static inline size_t map_hash(struct map* m, uint32_t k) {
 }
 
 static inline bool map_get(struct map* m, uint32_t k,
-                                  const size_t s, size_t* ix) {
+                           const size_t s, size_t* ix) {
     size_t i = s; // start
     const uint32_t mask = m->m;
     while (m->p[i]) {
@@ -122,6 +125,8 @@ static inline int32_t ft_lsb(int32_t i) { // least significant bit only
     return i & (~i + 1); // (i & -i)
 }
 
+// TODO: pm_init and ft_init can be collapsed to single function
+
 static void ft_init(uint64_t tree[], size_t n, uint64_t a[]) {
     const int32_t m = (int32_t)n;
     for (int32_t i = 0; i <  m; i++) { tree[i] = a[i]; }
@@ -133,19 +138,16 @@ static void ft_init(uint64_t tree[], size_t n, uint64_t a[]) {
     }
 }
 
+// TODO: it is possible to have different sized trees using generics - don't know it it worth it
+
 static inline void ft_update(uint64_t tree[], size_t n, int32_t i, uint64_t inc) {
-    while (i < (int32_t)n) {
-        tree[i] += inc;
-        i += ft_lsb(i + 1);
-    }
+    while (i < (int32_t)n) { tree[i] += inc; i += ft_lsb(i + 1); }
 }
 
 static inline uint64_t ft_query(const uint64_t tree[], size_t n, int32_t i) {
     uint64_t sum = 0;
     while (i >= 0) {
-        if (i < (int32_t)n) {
-            sum += tree[i];
-        }
+        if (i < (int32_t)n) { sum += tree[i]; }
         i -= ft_lsb(i + 1);
     }
     return sum;
@@ -338,8 +340,7 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
     }
 }
 
-// both lz_find and lz_linear function search longest match
-// at a shortest distance from position `i` and return
+// lz_find() function finds longest match at a shortest distance and returns
 // ml: [2..max_len] inclusive
 // md: [1..window] inclusive
 
@@ -354,11 +355,10 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     size_t len = 0;
     size_t dst = 0;
     const uint32_t b4 = incoming;
-    size_t p;
     size_t ix;
     bool b = map_get4(&s->map4, b4, &ix);
     if (b) {
-        p = (const uint8_t*)s->map4.p[ix] - in;
+        size_t p = (const uint8_t*)s->map4.p[ix] - in;
         size_t max_k = n - i > sqz_max_len ? sqz_max_len : n - i;
         size_t k = 4; // start with at least 4
         while (k < max_k && in[p + k] == in[i + k]) { k++; }
@@ -366,7 +366,9 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
         size_t index = p & (w - 1); // same as p % w for w = 2^x
         size_t d = s->prev[index];
         size_t prev_chain = 0;
-        while (len < sqz_max_len && 0 < d && d <= p && p - d < i && i <= p - d + w) {
+        // 0 < d && d <= p && p - d < i && i <= p - d + w
+        // 0 < d && i + d <= p + w
+        while (len < sqz_max_len && 0 < d && i + d <= p + w) {
             p -= d;
             if (len == 4 || memcmp(in + p + 4, in + i + 4, len - 4) == 0) {
                 k = len; // because with `len` bytes are the same
@@ -381,12 +383,12 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     if (len == 0) {
         b = map_get3(&s->map3, b4 & 0xFFFFFF, &ix);
         if (b) {
-            p = (const uint8_t*)s->map3.p[ix] - in;
+            size_t p = (const uint8_t*)s->map3.p[ix] - in;
             if (i - p <= w) { len = 3; dst = i - p; }
         }
     }
     if (len == 0) {
-        p = s->map2[b4 & 0xFFFF];
+        size_t p = s->map2[b4 & 0xFFFF];
         if (p > 0) {
             p--; // because map2[] keep position + 1
             if (i - p <= w) { len = 2; dst = i - p; }
@@ -440,9 +442,9 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
         assert(dist == 0 || 1 <= dist && dist <= UINT16_MAX + 1);
         // reject back references that take too much compressed space:
         if (len <= 3 && dist > 8) {
+            rejected++;
             len = 0;
             dist = 0;
-            rejected++;
         }
         if (len == 0) {
             // encode literal byte

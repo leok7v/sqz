@@ -27,6 +27,7 @@ enum {
 // #define sqz_err_no_space     55 // ENOBUFS: No buffer space available
 
 struct prob_model  { // probability model
+    // TODO: freq[] and tree[] may possibly be collapsed to a single array
     uint64_t freq[256];
     uint64_t tree[256]; // Fenwick Tree (aka BITS)
 };
