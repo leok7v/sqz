@@ -372,6 +372,7 @@ static struct {
     uint64_t seq[test_stats_count]; // number of match of this length
     uint64_t sum[test_stats_count]; // sum of bytes per sequence
     // running averages:
+    double   avg_byte;                  // of bits for a single byte
     double   avg_len[test_stats_count]; // of bits per sequence length
     double   avg_dst[test_stats_count]; // of bits per sequence distance
     double   avg_l2d;                   // of bits per 2 bytes sequence
@@ -387,7 +388,7 @@ static void running_average(double *ra, uint64_t v) {
     *ra = (*ra * (ts.matches - 1) + (double)v) / ts.matches;
 }
 
-static inline void debug_test_stat(size_t ml, size_t md) {
+static inline void debug_test_stat(uint8_t b, size_t ml, size_t md) {
     // `ml` match length >= 2 or zero
     // `md` match distance >= 1
     #if defined(DEBUG) || defined(LZ_TEST_STATS)
@@ -400,6 +401,10 @@ static inline void debug_test_stat(size_t ml, size_t md) {
     size_t ix = min(test_stats_count - 1, ml);
     ts.seq[ix]++;
     ts.sum[ix] += ml;
+    if (ix == 1) {
+        uint8_t bb = bits_of(b); // bits in directly encoded byte
+        running_average(&ts.avg_byte, bb);
+    }
     if (md > 0) {
         running_average(&ts.avg_len[ix], bl);
         running_average(&ts.avg_dst[ix], bm);
@@ -421,12 +426,11 @@ static inline void matches(void) {
     enum { n = test_stats_count };
     // sanity check
     uint64_t tm = 0; // total number of matches
-    for (size_t i = 0; i < n; i++) { tm += ts.seq[i]; }
+    for (size_t i = 1; i < n; i++) { tm += ts.seq[i]; }
     assert(tm == ts.matches);
     uint64_t tb = 0; // total number of bytes
-    for (size_t i = 0; i < n; i++) { tb += ts.sum[i]; }
+    for (size_t i = 1; i < n; i++) { tb += ts.sum[i]; }
     assert(ts.bytes - tb <= 5); // because we can have match at the end
-    assert(ts.seq[0] == 0); // match starts with 2 bytes
     // Stats per match
     printf("per match: %7lld ", ts.matches);
     const double m = (double)ts.matches;
@@ -434,33 +438,34 @@ static inline void matches(void) {
     if (p >= 0.1) {
         // interested in %% of "as is" bytes in respect of matches
         // as well as %% in respect of total input bytes:
-        printf("\"as is\" %.1f%% ", p);
+        printf("\"as is\" %4.1f%% ", p);
     }
     for (size_t i = 2; i < n - 1; i++) {
         p = 100.0 * (double)ts.seq[i] / m;
-        if (p >= 0.1) { printf("%zd: %.1f%% ", i, p); }
+        if (p >= 0.1) { printf("%zd: %4.1f%% ", i, p); }
     }
     p = 100.0 * (double)ts.seq[n - 1] / m;
-    if (p >= 0.1) { printf("%d+: %.1f%% ", n - 1, p); }
+    if (p >= 0.1) { printf("%d+: %4.1f%% ", n - 1, p); }
     p = 100.0 * (double)ts.seq[0] / m;
-    printf("l2:d1: %.1f%%\n", p);
+    printf("l2:d1: %4.1f%%\n", p);
     // Stats per input byte
     printf("per byte:  %7lld ", ts.bytes);
     const double b = (double)ts.bytes;
     p = 100.0 * (double)ts.sum[1] / b;
     if (p >= 0.01) {
-        printf("\"as is\" %.1f%% ", p);
+        printf("\"as is\" %4.1f%% ", p);
     }
     for (size_t i = 2; i < n - 1; i++) {
         p = 100.0 * (double)ts.sum[i] / b;
-        if (p >= 0.1) { printf("%zd: %.1f%% ", i, p); }
+        if (p >= 0.1) { printf("%zd: %4.1f%% ", i, p); }
     }
     p = 100.0 * (double)ts.sum[n - 1] / b;
-    if (p >= 0.1) { printf("%d+: %.1f%% ", n - 1, p); }
+    if (p >= 0.1) { printf("%d+: %4.1f%% ", n - 1, p); }
     p = 100.0 * (double)ts.sum[0] / b;
-    printf("l2:d1: %.1f%%\n", p);
+    printf("l2:d1: %4.1f%%\n", p);
     // Averages per match:
     printf("bits [len:dst] ");
+    printf("\"as is\"     %4.1f  ", ts.avg_byte);
     for (size_t i = 2; i < n; i++) {
         if (ts.avg_len[i] + ts.avg_dst[i] > 0.01) {
             printf("%zd: [%.1f:%.1f] ", i, ts.avg_len[i], ts.avg_dst[i]);
@@ -504,7 +509,7 @@ static int test(struct lz* lz, const uint8_t* in, const size_t n,
     while (i < n4) {
         size_t ml1 = 0, md1 = 0;
         lz_find(lz, in, n, w, i, incoming, &ml1, &md1);
-        debug_test_stat(ml1, md1);
+        debug_test_stat((uint8_t)(incoming & 0xFF), ml1, md1);
         if (debug_check_match(in, n, w, i, ml1, md1)) { return 1; }
 //      printf("[%2zd] incoming: %.4s 0x%08X leaving: %.4s 0x%08X\n",
 //             i, &incoming, incoming, &leaving, leaving);
