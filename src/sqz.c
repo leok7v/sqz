@@ -282,6 +282,7 @@ void sqz_init(struct sqz* s, bool compress) {
     pm_init(&s->pm_size, 256);
     pm_init(&s->pm_byte, 256);
     pm_init(&s->pm_l3d,  256);
+    pm_init(&s->pm_dix,  4);
     pm_init(&s->pm_lsb,  256);
     pm_init(&s->pm_msb,  256);
     // TODO: may as well have separate compressor/decompressor types
@@ -401,6 +402,20 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     }
 }
 
+#define sqz_dist_push(d4, dist) do { d4 = (d4 << 16) | dist; } while (0)
+
+static inline uint16_t sqz_dist(uint64_t d4, int ix) {
+    return (uint16_t)(d4 >> (ix << 4));
+}
+
+static inline int sqz_dist_ix(uint64_t d4, uint16_t dist) {
+    if (sqz_dist(d4, 0) == dist) { return 0; }
+    if (sqz_dist(d4, 1) == dist) { return 1; }
+    if (sqz_dist(d4, 2) == dist) { return 2; }
+    if (sqz_dist(d4, 3) == dist) { return 3; }
+    return -1;
+}
+
 #define sqz_update_incoming_leaving(incoming, leaving, in, i, n4, w) do {   \
     incoming >>= 8;                                                         \
     if (i < n4) {                                                           \
@@ -409,6 +424,11 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     if (i > w) {                                                            \
         leaving  = (leaving  >> 8) | (((uint32_t)in[(i) - (w) + 3]) << 24); \
     }                                                                       \
+} while (0)
+
+#define sqz_encode_byte(s, incoming) do {                               \
+    rc_encode(&((s)->rc), &((s)->pm_bit0), 1);                          \
+    rc_encode(&((s)->rc), &((s)->pm_byte), (uint8_t)(incoming & 0xFF)); \
 } while (0)
 
 #define sqz_insert_next(s, in, n4, w, i, len, incoming, leaving) do { \
@@ -432,8 +452,12 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         rc_encode(&s->rc, &s->pm_bit0, 1);
         rc_encode(&s->rc, &s->pm_byte, in[0]);
     }
+    uint64_t d4 = UINT64_MAX; // cache of last 4 distances
     size_t rejected2 = 0;
     size_t rejected3 = 0;
+    size_t short_dist = 0;
+    size_t short_dist2 = 0;
+    size_t short_dist3 = 0;
     uint32_t incoming = *(uint32_t*)in;
     uint32_t leaving = incoming;
     sqz_insert(s, in, n, w, 0, incoming, leaving);
@@ -441,44 +465,62 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     const size_t n4 = n - 4;
     sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
     while (i < n4) {
+// if (i == 72) { printf("d[71]=%c 0x%02X\n", in[71], in[71]); }
+// if (i == 73) { printf("d[72]=%c 0x%02X\n", in[72], in[72]); }
+// if (i == 95) { printf("d[94]=%c 0x%02X\n", in[94], in[94]); }
+// if (i == 96) { printf("d[95]=%c 0x%02X\n", in[95], in[95]); }
         size_t len = 0;
         size_t dist = 0;
         sqz_find(s, in, n, w, i, incoming, &len, &dist);
         assert(dist == 0 || 1 <= dist && dist <= UINT16_MAX + 1);
-        if (len == 2) {
-            // TODO: investigate and probably remove map2[] alltogether
-            rejected2++; // always reject 2 bytes matches
+        if (len == 0 || len == 2) { // encode literal byte
             len = 0;
-            dist = 0;
-        }
-        // reject back references that take too much compressed space:
-        if (len == 3 && dist >= 256) {
-            rejected3++;
-            len = 0;
-            dist = 0;
-        }
-        assert(len == 0 || len > 2);
-        if (len == 0) {
-            // encode literal byte
-            rc_encode(&s->rc, &s->pm_bit0, 1);
-            rc_encode(&s->rc, &s->pm_byte, in[i]);
-        } else if (len == 3) {
-            dist--; // 0..UINT16
-            assert(dist <= 255);
-            rc_encode(&s->rc, &s->pm_bit0, 0);
-            rc_encode(&s->rc, &s->pm_bit1, 0);
-            rc_encode(&s->rc, &s->pm_l3d, (uint8_t)dist);
+            sqz_encode_byte(s, incoming);
         } else {
-            dist--; // 0..UINT16
+            dist--; // [0..UINT16_MAX]
             assert(dist <= UINT16_MAX);
-            assert(len >= 3);
-            rc_encode(&s->rc, &s->pm_bit0, 0);
-            rc_encode(&s->rc, &s->pm_bit1, 1);
-            rc_encode(&s->rc, &s->pm_size, (uint8_t)len);
-            rc_encode(&s->rc, &s->pm_bit2, (uint8_t)(dist >= 256));
-            rc_encode(&s->rc, &s->pm_lsb,  (uint8_t)(dist & 0xFF));
-            if (dist >= 256) {
-                rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
+            int dix = sqz_dist_ix(d4, (uint16_t)dist);
+            if (len == 3 && dix >= 0) {
+                rc_encode(&s->rc, &s->pm_bit0, 0);
+                rc_encode(&s->rc, &s->pm_bit1, 0);
+                rc_encode(&s->rc, &s->pm_bit2, 0);
+                rc_encode(&s->rc, &s->pm_dix, (uint8_t)dix);
+//              printf("[%5zd] len: %5zd dist: %5zd dix: %d\n", i, len, dist, dix);
+                sqz_dist_push(d4, dist);
+            } else if (len == 3 && dist <= 255) {
+                rc_encode(&s->rc, &s->pm_bit0, 0);
+                rc_encode(&s->rc, &s->pm_bit1, 0);
+                rc_encode(&s->rc, &s->pm_bit2, 1);
+                rc_encode(&s->rc, &s->pm_l3d, (uint8_t)dist);
+//              printf("[%5zd] len: %5zd dist: %5zd\n", i, len, dist);
+                sqz_dist_push(d4, dist);
+            } else if (len > 3 && dix >= 0) {
+                rc_encode(&s->rc, &s->pm_bit0, 0);
+                rc_encode(&s->rc, &s->pm_bit1, 1);
+                rc_encode(&s->rc, &s->pm_bit2, 1);
+                rc_encode(&s->rc, &s->pm_bit3, 0);
+                rc_encode(&s->rc, &s->pm_size, (uint8_t)len);
+                rc_encode(&s->rc, &s->pm_dix,  (uint8_t)(dix));
+//              printf("[%5zd] len: %5zd dist: %5zd dix: %d\n", i, len, dist, dix);
+                sqz_dist_push(d4, dist);
+            } else if (len > 3) {
+                rc_encode(&s->rc, &s->pm_bit0, 0);
+                rc_encode(&s->rc, &s->pm_bit1, 1);
+                rc_encode(&s->rc, &s->pm_bit2, 1);
+                rc_encode(&s->rc, &s->pm_bit3, 1);
+                rc_encode(&s->rc, &s->pm_size, (uint8_t)len);
+                rc_encode(&s->rc, &s->pm_lsb,  (uint8_t)(dist & 0xFF));
+                rc_encode(&s->rc, &s->pm_msb,  (uint8_t)(dist >> 8));
+//              printf("[%5zd] len: %5zd dist: %5zd\n", i, len, dist);
+                sqz_dist_push(d4, dist);
+            } else {
+                len = 0;
+                sqz_encode_byte(s, incoming);
+            }
+            if (dix >= 0) {
+                short_dist++;
+                if (len == 2) { short_dist2++; }
+                if (len == 3) { short_dist3++; }
             }
         }
         sqz_insert_next(s, in, n4, w, i, len, incoming, leaving);
@@ -490,9 +532,12 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     }
     rc_encode(&s->rc, &s->pm_bit0, 0);
     rc_encode(&s->rc, &s->pm_bit1, 1);
+    rc_encode(&s->rc, &s->pm_bit2, 1);
+    rc_encode(&s->rc, &s->pm_bit3, 0);
     rc_encode(&s->rc, &s->pm_size, 0xFF);
     rc_flush(&s->rc);
-    printf("rejected 2: %zu 3: %zu\n", rejected2, rejected3);
+    printf("rejected 2: %zu 3: %zu short_dist: %zu 2: %zu 3: %zu\n",
+            rejected2, rejected3, short_dist, short_dist2, short_dist3);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
@@ -500,47 +545,69 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
     for (size_t i = 0; i < sizeof(s->rc.code); i++) {
         s->rc.code = (s->rc.code << 8) + s->rc.read(&s->rc);
     }
+    uint64_t d4 = UINT64_MAX; // cache of last 4 distances
     uint8_t* d = (uint8_t*)data;
     size_t i = 0;
     while (s->rc.error == 0) {
-        uint8_t bit0  = rc_decode(&s->rc, &s->pm_bit0);
+        uint8_t bits  = rc_decode(&s->rc, &s->pm_bit0);
         if (s->rc.error != 0) { break; }
-        if (bit0) {
+        if (bits == 0b1) {
             if (i < bytes) {
                 d[i++] = rc_decode(&s->rc, &s->pm_byte);
+
+// const uint8_t* in = d;
+// if (i == 72) { printf("d[71]=%c 0x%02X\n", in[71], in[71]); }
+// if (i == 73) { printf("d[72]=%c 0x%02X\n", in[72], in[72]); }
+// if (i == 95) { printf("d[94]=%c 0x%02X\n", in[94], in[94]); }
+// if (i == 96) { printf("d[95]=%c 0x%02X\n", in[95], in[95]); }
             } else {
                 s->rc.error = ENOBUFS;
             }
         } else {
-            uint8_t bit1 = rc_decode(&s->rc, &s->pm_bit1);
-            uint8_t size = bit1 ? rc_decode(&s->rc, &s->pm_size) : 3;
-            if (size == 0xFF) { break; } // end of stream
-            if (size < sqz_min_len || size > sqz_max_len) {
-                s->rc.error = ERANGE;
+            uint8_t  size;
+            uint32_t dist;
+            bits |= (rc_decode(&s->rc, &s->pm_bit1) << 1);
+            bits |= (rc_decode(&s->rc, &s->pm_bit2) << 2);
+            if (bits == 0b000) {
+                size = 3;
+                const int dix = rc_decode(&s->rc, &s->pm_dix);
+                dist = sqz_dist(d4, dix);
+//              printf("[%5zd] len: %5zd dist: %5u dix: %d\n", i, size, dist, dix);
+                sqz_dist_push(d4, dist);
+            } else if (bits == 0b100) {
+                size = 3;
+                dist = rc_decode(&s->rc, &s->pm_l3d);
+//              printf("[%5zd] len: %5zd dist: %5u\n", i, size, dist);
+                sqz_dist_push(d4, dist);
             } else {
-                uint32_t dist = 0;
-                if (size == 3) {
-                    dist = rc_decode(&s->rc, &s->pm_l3d);
+                assert(bits == 0b110);
+                bits |= (rc_decode(&s->rc, &s->pm_bit3) << 3);
+                size  =  rc_decode(&s->rc, &s->pm_size);
+                if (size == 0xFF) { break; }
+                if (bits == 0b0110) {
+                    const int dix = rc_decode(&s->rc, &s->pm_dix);
+                    dist = sqz_dist(d4, dix);
+//                  printf("[%5zd] len: %5zd dist: %5u dix: %d\n", i, size, dist, dix);
                 } else {
-                    uint8_t bit2 = rc_decode(&s->rc, &s->pm_bit2);
+                    assert(bits == 0b1110);
                     dist = rc_decode(&s->rc, &s->pm_lsb);
-                    if (bit2) {
-                        dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
-                    }
+                    dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
+//                  printf("[%5zd] len: %5zd dist: %5u\n", i, size, dist);
                 }
-                dist++;
-                if (s->rc.error == 0) {
-                    const size_t n = i + size;
-                    if (i < dist) {
-                        s->rc.error = ERANGE;
-                    } else if (i >= dist && n <= bytes) {
-                        // memcpy() cannot be used on overlapped regions
-                        // because it may read more than one byte at a time.
-                        uint8_t* p = d - (size_t)dist;
-                        while (i < n) { d[i] = p[i]; i++; }
-                    } else {
-                        s->rc.error = ENOBUFS;
-                    }
+                sqz_dist_push(d4, dist);
+            }
+            dist++;
+            if (s->rc.error == 0) {
+                const size_t n = i + size;
+                if (i < dist) {
+                    s->rc.error = ERANGE;
+                } else if (i >= dist && n <= bytes) {
+                    // memcpy() cannot be used on overlapped regions
+                    // because it may read more than one byte at a time.
+                    uint8_t* p = d - (size_t)dist;
+                    while (i < n) { d[i] = p[i]; i++; }
+                } else {
+                    s->rc.error = ENOBUFS;
                 }
             }
         }

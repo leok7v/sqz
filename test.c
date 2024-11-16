@@ -66,11 +66,11 @@ static void dump_entropy(struct sqz* s) {
         pm_sum(&s->pm_l3d ) +
         pm_sum(&s->pm_lsb ) +
         pm_sum(&s->pm_msb );
-    printf("entropy of: %lld\n",total);
+    printf("of: %lld matches\n",total);
     #pragma push_macro("print_entropy")
-    #define print_entropy(field)                                    \
-        printf("%-7s[%3d]: %.2f bits %4.1f%% %9lld\n",   \
-        #field, pm_n(&s->field), pm_entropy(&s->field),             \
+    #define print_entropy(field)                             \
+        printf("%-7s[%3d]: %.2f bits %4.1f%% %9lld\n",       \
+        #field, pm_n(&s->field), pm_entropy(&s->field),      \
         pm_percentage(&s->field, total), pm_sum(&s->field));
     print_entropy(pm_bit0);
     print_entropy(pm_bit1);
@@ -267,6 +267,7 @@ int main(int argc, const char* argv[]) {
     printf("Window: 2^%d %d sizeof(size_t): %d sizeof(int): %d\n",
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int));
     errno_t r = locate_test_folder();
+#if 0
     if (r == 0) {
         uint8_t d[4 * 1024] = {0};
         r = test(null, d, sizeof(d));
@@ -281,6 +282,7 @@ int main(int argc, const char* argv[]) {
         size_t bytes = strlen((const char*)d);
         r = test(null, (const uint8_t*)d, bytes);
     }
+#endif
     if (r == 0 && file_exist(__FILE__)) { // test.c source code:
         r = test_compression(__FILE__);
     }

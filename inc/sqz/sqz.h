@@ -60,6 +60,7 @@ struct sqz {
     struct prob_model  pm_size;     // size: 0..255
     struct prob_model  pm_byte;     // single byte
     struct prob_model  pm_l3d;      // 0..7   len == 3 distance
+    struct prob_model  pm_dix;      // 0..3 short distance index
     struct prob_model  pm_lsb;      // 0..255 distance least significant byte
     struct prob_model  pm_msb;      // 0..255 distance most  significant byte
     // TODO: we may have 2 types decompressor and compressor
