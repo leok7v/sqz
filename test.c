@@ -14,6 +14,23 @@ enum { window_bits = 16 };
 
 // Test is limited to "size_t" and "int" precision
 
+static const char* thousands(uint64_t value) {
+    static char text[32][64];
+    static size_t ix;
+    char* s = text[ix];
+    ix = (ix + 1) % (sizeof(text) / sizeof(text[0]));
+    size_t i = sizeof(text[0]) - 1;
+    s[i] = 0;
+    int gc = 0; // group count
+    do {
+        if (gc == 3) { s[--i] = ','; gc = 0; }
+        s[--i] = '0' + (value % 10);
+        value /= 10;
+        gc++;
+    } while (value > 0);
+    return &s[i];
+}
+
 static double entropy(uint64_t* freq, size_t n) { // Shannon entropy
     double total = 0;
     for (size_t i = 0; i < n; i++) {
@@ -31,32 +48,35 @@ static double entropy(uint64_t* freq, size_t n) { // Shannon entropy
     return e;
 }
 
-static size_t pm_n(struct prob_model* pm) {
-    size_t n = 0;
-    for (size_t i = 0; i < countof(pm->freq); i++) {
-        n += pm->freq[i] > 1;
-    }
+static uint64_t pm_n(struct prob_model* pm) {
+    uint64_t n = 0;
+    for (size_t i = 0; i < countof(pm->freq); i++) { n += pm->freq[i] > 1; }
     return n;
 }
 
-static size_t pm_sum(struct prob_model* pm) {
-    size_t sum = 0;
+static uint64_t pm_sum(struct prob_model* pm) {
+    uint64_t sum = 0;
     for (size_t i = 0; i < countof(pm->freq); i++) {
         if (pm->freq[i] > 1) { sum += pm->freq[i] - 1; }
     }
     return sum;
 }
 
-static double pm_percentage(struct prob_model* pm, size_t total) {
-    return 100.0 * pm_sum(pm) / (double)total;
+static double pm_match_percentage(uint64_t sum, size_t total) {
+    return 100.0 * (double)sum / (double)total;
+}
+
+static double pm_stream_percentage(uint64_t sum, double ent,
+                                   size_t compressed) {
+    return 100.0 * sum * ent / (8.0 * (double)compressed);
 }
 
 static double pm_entropy(struct prob_model* pm) {
     return entropy(pm->freq, pm_n(pm));
 }
 
-static void dump_entropy(struct sqz* s) {
-    size_t total =
+static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
+    uint64_t total =
         pm_sum(&s->pm_bit0) +
         pm_sum(&s->pm_bit1) +
         pm_sum(&s->pm_bit2) +
@@ -66,12 +86,17 @@ static void dump_entropy(struct sqz* s) {
         pm_sum(&s->pm_l3d ) +
         pm_sum(&s->pm_lsb ) +
         pm_sum(&s->pm_msb );
-    printf("of: %lld matches\n",total);
+    printf("of: %s matches %s -> %s\n", thousands(total), thousands(bytes), thousands(compressed));
     #pragma push_macro("print_entropy")
-    #define print_entropy(field)                             \
-        printf("%-7s[%3d]: %.2f bits %4.1f%% %9lld\n",       \
-        #field, pm_n(&s->field), pm_entropy(&s->field),      \
-        pm_percentage(&s->field, total), pm_sum(&s->field));
+    #define print_entropy(field) do {                               \
+        uint64_t num = pm_n(&s->field);                             \
+        double   ent = pm_entropy(&s->field);                       \
+        uint64_t sum = pm_sum(&s->field);                           \
+        double mp =  pm_match_percentage(sum, total);               \
+        double sp =  pm_stream_percentage(sum, ent, compressed);    \
+        printf("%-7s[%3d]: %.2f bits %4.1f%% %4.1f%% %10.10s\n",    \
+               #field, num, ent, mp, sp, thousands(sum));           \
+    } while (0)
     print_entropy(pm_bit0);
     print_entropy(pm_bit1);
     print_entropy(pm_bit2);
@@ -128,7 +153,7 @@ static errno_t compress(const char* from, const char* to,
         encoder.rc.error = out.error;
     }
     if (encoder.rc.error == 0) {
-        dump_entropy(&encoder);
+        dump_entropy(&encoder, bytes, out.written);
         char* fn = from == null ? null : strrchr(from, '\\'); // basename
         if (fn == null) { fn = from == null ? null : strrchr(from, '/'); }
         if (fn != null) { fn++; } else { fn = (char*)from; }

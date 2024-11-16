@@ -555,11 +555,6 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         rc_encode(&s->rc, &s->pm_byte, in[0]);
     }
     uint64_t d4 = UINT64_MAX; // cache of last 4 distances
-    size_t rejected2 = 0;
-    size_t rejected3 = 0;
-    size_t short_dist = 0;
-    size_t short_dist2 = 0;
-    size_t short_dist3 = 0;
     uint32_t incoming = *(uint32_t*)in;
     uint32_t leaving = incoming;
     sqz_insert(s, in, n, w, 0, incoming, leaving);
@@ -567,10 +562,6 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     const size_t n4 = n - 4;
     sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
     while (i < n4) {
-// if (i == 72) { printf("d[71]=%c 0x%02X\n", in[71], in[71]); }
-// if (i == 73) { printf("d[72]=%c 0x%02X\n", in[72], in[72]); }
-// if (i == 95) { printf("d[94]=%c 0x%02X\n", in[94], in[94]); }
-// if (i == 96) { printf("d[95]=%c 0x%02X\n", in[95], in[95]); }
         size_t len = 0;
         size_t dist = 0;
         sqz_find(s, in, n, w, i, incoming, &len, &dist);
@@ -587,14 +578,12 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
                 rc_encode(&s->rc, &s->pm_bit1, 0);
                 rc_encode(&s->rc, &s->pm_bit2, 0);
                 rc_encode(&s->rc, &s->pm_dix, (uint8_t)dix);
-//              printf("[%5zd] len: %5zd dist: %5zd dix: %d\n", i, len, dist, dix);
                 sqz_dist_push(d4, dist);
             } else if (len == 3 && dist <= 255) {
                 rc_encode(&s->rc, &s->pm_bit0, 0);
                 rc_encode(&s->rc, &s->pm_bit1, 0);
                 rc_encode(&s->rc, &s->pm_bit2, 1);
                 rc_encode(&s->rc, &s->pm_l3d, (uint8_t)dist);
-//              printf("[%5zd] len: %5zd dist: %5zd\n", i, len, dist);
                 sqz_dist_push(d4, dist);
             } else if (len > 3 && dix >= 0) {
                 rc_encode(&s->rc, &s->pm_bit0, 0);
@@ -603,7 +592,6 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
                 rc_encode(&s->rc, &s->pm_bit3, 0);
                 rc_encode(&s->rc, &s->pm_size, (uint8_t)len);
                 rc_encode(&s->rc, &s->pm_dix,  (uint8_t)(dix));
-//              printf("[%5zd] len: %5zd dist: %5zd dix: %d\n", i, len, dist, dix);
                 sqz_dist_push(d4, dist);
             } else if (len > 3) {
                 rc_encode(&s->rc, &s->pm_bit0, 0);
@@ -613,16 +601,10 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
                 rc_encode(&s->rc, &s->pm_size, (uint8_t)len);
                 rc_encode(&s->rc, &s->pm_lsb,  (uint8_t)(dist & 0xFF));
                 rc_encode(&s->rc, &s->pm_msb,  (uint8_t)(dist >> 8));
-//              printf("[%5zd] len: %5zd dist: %5zd\n", i, len, dist);
                 sqz_dist_push(d4, dist);
             } else {
                 len = 0;
                 sqz_encode_byte(s, incoming);
-            }
-            if (dix >= 0) {
-                short_dist++;
-                if (len == 2) { short_dist2++; }
-                if (len == 3) { short_dist3++; }
             }
         }
         sqz_insert_next(s, in, n4, w, i, len, incoming, leaving);
@@ -638,8 +620,6 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     rc_encode(&s->rc, &s->pm_bit3, 0);
     rc_encode(&s->rc, &s->pm_size, 0xFF);
     rc_flush(&s->rc);
-    printf("rejected 2: %zu 3: %zu short_dist: %zu 2: %zu 3: %zu\n",
-            rejected2, rejected3, short_dist, short_dist2, short_dist3);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
@@ -656,12 +636,6 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
         if (bits == 0b1) {
             if (i < bytes) {
                 d[i++] = rc_decode(&s->rc, &s->pm_byte);
-
-// const uint8_t* in = d;
-// if (i == 72) { printf("d[71]=%c 0x%02X\n", in[71], in[71]); }
-// if (i == 73) { printf("d[72]=%c 0x%02X\n", in[72], in[72]); }
-// if (i == 95) { printf("d[94]=%c 0x%02X\n", in[94], in[94]); }
-// if (i == 96) { printf("d[95]=%c 0x%02X\n", in[95], in[95]); }
             } else {
                 s->rc.error = ENOBUFS;
             }
@@ -674,12 +648,10 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
                 size = 3;
                 const int dix = rc_decode(&s->rc, &s->pm_dix);
                 dist = sqz_dist(d4, dix);
-//              printf("[%5zd] len: %5zd dist: %5u dix: %d\n", i, size, dist, dix);
                 sqz_dist_push(d4, dist);
             } else if (bits == 0b100) {
                 size = 3;
                 dist = rc_decode(&s->rc, &s->pm_l3d);
-//              printf("[%5zd] len: %5zd dist: %5u\n", i, size, dist);
                 sqz_dist_push(d4, dist);
             } else {
                 assert(bits == 0b110);
@@ -689,12 +661,10 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
                 if (bits == 0b0110) {
                     const int dix = rc_decode(&s->rc, &s->pm_dix);
                     dist = sqz_dist(d4, dix);
-//                  printf("[%5zd] len: %5zd dist: %5u dix: %d\n", i, size, dist, dix);
                 } else {
                     assert(bits == 0b1110);
                     dist = rc_decode(&s->rc, &s->pm_lsb);
                     dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
-//                  printf("[%5zd] len: %5zd dist: %5u\n", i, size, dist);
                 }
                 sqz_dist_push(d4, dist);
             }
