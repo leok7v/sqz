@@ -9,6 +9,8 @@ test/hhgttg.txt
 test/kjv-bible.txt
 test/lao-tzu.txt
 test/the-analects-of-confucius.txt
+test/corpus
+test/silesia.tar
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/
