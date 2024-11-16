@@ -128,6 +128,7 @@ static errno_t compress(const char* from, const char* to,
         encoder.rc.error = out.error;
     }
     if (encoder.rc.error == 0) {
+        dump_entropy(&encoder);
         char* fn = from == null ? null : strrchr(from, '\\'); // basename
         if (fn == null) { fn = from == null ? null : strrchr(from, '/'); }
         if (fn != null) { fn++; } else { fn = (char*)from; }
@@ -142,7 +143,6 @@ static errno_t compress(const char* from, const char* to,
                   (uint64_t)bytes, out.written, pc);
         }
     }
-    dump_entropy(&encoder);
     return encoder.rc.error;
 }
 

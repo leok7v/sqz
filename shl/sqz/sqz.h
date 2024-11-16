@@ -502,31 +502,34 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     }
 }
 
-#define sqz_update_incoming_leaving(incoming, leaving, in, i, w) do {       \
-    incoming = (incoming >> 8) | (((uint32_t)in[(i) + 3]) << 24);           \
+#define sqz_update_incoming_leaving(incoming, leaving, in, i, n4, w) do {   \
+    incoming >>= 8;                                                         \
+    if (i < n4) {                                                           \
+        incoming |= (((uint32_t)in[(i) + 3]) << 24);                        \
+    }                                                                       \
     if (i > w) {                                                            \
         leaving  = (leaving  >> 8) | (((uint32_t)in[(i) - (w) + 3]) << 24); \
     }                                                                       \
 } while (0)
 
-#define sqz_insert_next(s, in, n, w, i, len, incoming, leaving) do { \
-    const size_t next_i = i + ((len) > 0 ? (len) : 1);               \
-    while (i < next_i) {                                             \
-        sqz_insert(s, in, n, w, i, incoming, leaving);               \
-        i++;                                                         \
-        sqz_update_incoming_leaving(incoming, leaving, in, i, w);    \
-    }                                                                \
+#define sqz_insert_next(s, in, n4, w, i, len, incoming, leaving) do { \
+    const size_t next_i = i + ((len) > 0 ? (len) : 1);                \
+    while (i < next_i) {                                              \
+        sqz_insert(s, in, n4, w, i, incoming, leaving);               \
+        i++;                                                          \
+        sqz_update_incoming_leaving(incoming, leaving, in, i, n4, w); \
+    }                                                                 \
 } while (0)
 
-void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t window) {
+void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
-    if (bytes > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
+    if (n > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
         s->rc.error = E2BIG;
         return;
     }
     const uint8_t* in = (const uint8_t*)memory;
-    assert(sqz_min_window <= window && window <= sqz_max_window);
-    if (bytes > 0) {
+    assert(sqz_min_window <= w && w <= sqz_max_window);
+    if (n > 0) {
         rc_encode(&s->rc, &s->pm_bit0, 1);
         rc_encode(&s->rc, &s->pm_byte, in[0]);
     }
@@ -534,14 +537,14 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
     size_t rejected3 = 0;
     uint32_t incoming = *(uint32_t*)in;
     uint32_t leaving = incoming;
-    sqz_insert(s, in, bytes, window, 0, incoming, leaving);
+    sqz_insert(s, in, n, w, 0, incoming, leaving);
     size_t i = 1;
-    sqz_update_incoming_leaving(incoming, leaving, in, 1, window);
-    const size_t n4 = bytes - 4;
+    const size_t n4 = n - 4;
+    sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
     while (i < n4) {
         size_t len = 0;
         size_t dist = 0;
-        sqz_find(s, in, bytes, window, i, incoming, &len, &dist);
+        sqz_find(s, in, n, w, i, incoming, &len, &dist);
         assert(dist == 0 || 1 <= dist && dist <= UINT16_MAX + 1);
         if (len == 2) {
             // TODO: investigate and probably remove map2[] alltogether
@@ -579,9 +582,9 @@ void sqz_compress(struct sqz* s, const void* memory, size_t bytes, uint32_t wind
                 rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
             }
         }
-        sqz_insert_next(s, in, bytes, window, i, len, incoming, leaving);
+        sqz_insert_next(s, in, n4, w, i, len, incoming, leaving);
     }
-    while (i < bytes) {
+    while (i < n) {
         rc_encode(&s->rc, &s->pm_bit0, 1);
         rc_encode(&s->rc, &s->pm_byte, in[i]);
         i++;
