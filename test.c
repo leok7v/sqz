@@ -79,12 +79,9 @@ static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
     uint64_t total =
         pm_sum(&s->pm_bit0) +
         pm_sum(&s->pm_bit1) +
-        pm_sum(&s->pm_bit2) +
-        pm_sum(&s->pm_bit3) +
         pm_sum(&s->pm_byte) +
-        pm_sum(&s->pm_l3d)  +
         pm_sum(&s->pm_dix)  +
-        pm_sum(&s->pm_size) +
+        pm_sum(&s->pm_len) +
         pm_sum(&s->pm_lsb ) +
         pm_sum(&s->pm_msb );
     printf("of: %s matches %s -> %s\n", thousands(total), thousands(bytes), thousands(compressed));
@@ -100,12 +97,9 @@ static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
     } while (0)
     print_entropy(pm_bit0);
     print_entropy(pm_bit1);
-    print_entropy(pm_bit2);
-    print_entropy(pm_bit3);
     print_entropy(pm_byte);
-    print_entropy(pm_l3d);
     print_entropy(pm_dix);
-    print_entropy(pm_size);
+    print_entropy(pm_len);
     print_entropy(pm_lsb);
     print_entropy(pm_msb);
     #pragma pop_macro("print_entropy")

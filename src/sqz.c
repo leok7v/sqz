@@ -277,12 +277,9 @@ void sqz_init(struct sqz* s, bool compress) {
     rc_init(&s->rc, 0);
     pm_init(&s->pm_bit0, 2);
     pm_init(&s->pm_bit1, 2);
-    pm_init(&s->pm_bit2, 2);
-    pm_init(&s->pm_bit3, 2);
     pm_init(&s->pm_byte, 256);
-    pm_init(&s->pm_l3d,  256);
     pm_init(&s->pm_dix,  4);
-    pm_init(&s->pm_size, 256);
+    pm_init(&s->pm_len, 256);
     pm_init(&s->pm_lsb,  256);
     pm_init(&s->pm_msb,  256);
     // TODO: may as well have separate compressor/decompressor types
@@ -471,32 +468,16 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
             dist--; // [0..UINT16_MAX]
             assert(dist <= UINT16_MAX);
             int dix = sqz_dist_ix(d4, (uint16_t)dist);
-            if (len == 3 && dix >= 0) {
+            if (len >= 2 && dix >= 0) {
                 rc_encode(&s->rc, &s->pm_bit0, 0);
                 rc_encode(&s->rc, &s->pm_bit1, 0);
-                rc_encode(&s->rc, &s->pm_bit2, 0);
-                rc_encode(&s->rc, &s->pm_dix, (uint8_t)dix);
-                sqz_dist_push(d4, dist);
-            } else if (len == 3 && dist <= 255) {
-                rc_encode(&s->rc, &s->pm_bit0, 0);
-                rc_encode(&s->rc, &s->pm_bit1, 0);
-                rc_encode(&s->rc, &s->pm_bit2, 1);
-                rc_encode(&s->rc, &s->pm_l3d, (uint8_t)dist);
-                sqz_dist_push(d4, dist);
-            } else if (len > 3 && dix >= 0) {
-                rc_encode(&s->rc, &s->pm_bit0, 0);
-                rc_encode(&s->rc, &s->pm_bit1, 1);
-                rc_encode(&s->rc, &s->pm_bit2, 1);
-                rc_encode(&s->rc, &s->pm_bit3, 0);
-                rc_encode(&s->rc, &s->pm_size, (uint8_t)len);
+                rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
                 rc_encode(&s->rc, &s->pm_dix,  (uint8_t)dix);
                 sqz_dist_push(d4, dist);
-            } else if (len > 3) {
+            } else if (len >= 2) {
                 rc_encode(&s->rc, &s->pm_bit0, 0);
                 rc_encode(&s->rc, &s->pm_bit1, 1);
-                rc_encode(&s->rc, &s->pm_bit2, 1);
-                rc_encode(&s->rc, &s->pm_bit3, 1);
-                rc_encode(&s->rc, &s->pm_size, (uint8_t)len);
+                rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
                 rc_encode(&s->rc, &s->pm_lsb,  (uint8_t)(dist & 0xFF));
                 rc_encode(&s->rc, &s->pm_msb,  (uint8_t)(dist >> 8));
                 sqz_dist_push(d4, dist);
@@ -513,10 +494,8 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         i++;
     }
     rc_encode(&s->rc, &s->pm_bit0, 0);
-    rc_encode(&s->rc, &s->pm_bit1, 1);
-    rc_encode(&s->rc, &s->pm_bit2, 1);
-    rc_encode(&s->rc, &s->pm_bit3, 0);
-    rc_encode(&s->rc, &s->pm_size, 0xFF);
+    rc_encode(&s->rc, &s->pm_bit1, 0);
+    rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
 }
 
@@ -529,46 +508,32 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
     uint8_t* d = (uint8_t*)data;
     size_t i = 0;
     while (s->rc.error == 0) {
-        uint8_t bits  = rc_decode(&s->rc, &s->pm_bit0);
+        const uint8_t bit0 = rc_decode(&s->rc, &s->pm_bit0);
         if (s->rc.error != 0) { break; }
-        if (bits == 0b1) {
+        if (bit0) {
             if (i < bytes) {
                 d[i++] = rc_decode(&s->rc, &s->pm_byte);
             } else {
                 s->rc.error = ENOBUFS;
             }
         } else {
-            uint8_t  size;
+            uint8_t  len;
             uint32_t dist;
-            bits |= (rc_decode(&s->rc, &s->pm_bit1) << 1);
-            bits |= (rc_decode(&s->rc, &s->pm_bit2) << 2);
-            if (bits == 0b000) {
-                size = 3;
+            const uint8_t bit1 = rc_decode(&s->rc, &s->pm_bit1);
+            if (bit1) {
+                len  = rc_decode(&s->rc, &s->pm_len);
+                dist = rc_decode(&s->rc, &s->pm_lsb);
+                dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
+            } else {
+                len = rc_decode(&s->rc, &s->pm_len);
+                if (len == 0xFF) { break; }
                 const int dix = rc_decode(&s->rc, &s->pm_dix);
                 dist = sqz_dist(d4, dix);
-                sqz_dist_push(d4, dist);
-            } else if (bits == 0b100) {
-                size = 3;
-                dist = rc_decode(&s->rc, &s->pm_l3d);
-                sqz_dist_push(d4, dist);
-            } else {
-                assert(bits == 0b110);
-                const uint8_t bit3 = rc_decode(&s->rc, &s->pm_bit3);
-                if (bit3) {
-                    size  = rc_decode(&s->rc, &s->pm_size);
-                    dist  = rc_decode(&s->rc, &s->pm_lsb);
-                    dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
-                } else {
-                    size = rc_decode(&s->rc, &s->pm_size);
-                    if (size == 0xFF) { break; }
-                    const int dix = rc_decode(&s->rc, &s->pm_dix);
-                    dist = sqz_dist(d4, dix);
-                }
-                sqz_dist_push(d4, dist);
             }
+            sqz_dist_push(d4, dist);
             dist++;
             if (s->rc.error == 0) {
-                const size_t n = i + size;
+                const size_t n = i + len;
                 if (i < dist) {
                     s->rc.error = ERANGE;
                 } else if (i >= dist && n <= bytes) {
