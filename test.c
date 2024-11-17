@@ -78,12 +78,10 @@ static double pm_entropy(struct prob_model* pm) {
 static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
     uint64_t total =
         pm_sum(&s->pm_bit0) +
-        pm_sum(&s->pm_bit1) +
         pm_sum(&s->pm_byte) +
-        pm_sum(&s->pm_dix)  +
-        pm_sum(&s->pm_len) +
-        pm_sum(&s->pm_lsb ) +
-        pm_sum(&s->pm_msb );
+        pm_sum(&s->pm_len)  +
+        pm_sum(&s->pm_lsb)  +
+        pm_sum(&s->pm_msb);
     printf("of: %s matches %s -> %s\n", thousands(total), thousands(bytes), thousands(compressed));
     #pragma push_macro("print_entropy")
     #define print_entropy(field) do {                               \
@@ -96,9 +94,7 @@ static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
                #field, num, ent, mp, sp, thousands(sum));           \
     } while (0)
     print_entropy(pm_bit0);
-    print_entropy(pm_bit1);
     print_entropy(pm_byte);
-    print_entropy(pm_dix);
     print_entropy(pm_len);
     print_entropy(pm_lsb);
     print_entropy(pm_msb);
@@ -158,16 +154,16 @@ static errno_t compress(const char* from, const char* to,
         if (fn != null) { fn++; } else { fn = (char*)from; }
         double pc  = out.written * 100.0 / bytes; // percent
         double bps = out.written * 8.0   / bytes; // bits per symbol
-        printf("bps: %4.1f ", bps);
+        printf("time: %.3fs ", dt / 1.0e9);
         if (from != null) {
-            printf("%7lld -> %7lld %6.2f%% of \"%s\" ",
-                  (uint64_t)bytes, out.written, pc, fn);
+            printf("%-11s -> %-11s %6.2f%% of \"%s\" ",
+                  thousands(bytes), thousands(out.written), pc, fn);
         } else {
-            printf("%7lld -> %7lld %6.2f%% ",
-                  (uint64_t)bytes, out.written, pc);
+            printf("%-11s -> %-11s %6.2f%% ",
+                  thousands(bytes), thousands(out.written), pc);
         }
-        printf("Time: %.3fs Bitrate: %.3f MiB/s\n",
-                dt / 1.0e9, bytes / (dt / 1.0e9) / (1024 * 1024));
+        printf("bps: %.1f ", bps);
+        printf("bitrate: %.1f MiB/s\n", bytes / (dt / 1.0e9) / (1024 * 1024));
     }
     return encoder.rc.error;
 }
@@ -248,7 +244,7 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
         }
         swear(decompressed == bytes);
         swear(decoder.rc.error == 0);
-        printf("Decompress Time: %.3fs Bitrate: %.3f MiB/s\n",
+        printf("decompress time: %.3fs bitrate: %.1f MiB/s\n",
                t / 1.0e9, size / (t / 1.0e9) / (1024 * 1024));
     }
     io_close(&out);

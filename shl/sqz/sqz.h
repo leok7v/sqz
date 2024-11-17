@@ -14,8 +14,7 @@ enum {
 
 // See: posix errno.h https://pubs.opengroup.org/onlinepubs/9699919799/
 // Range coder errors can be any values != 0 but for the convenience
-// of debugging (e.g. strerror()) and testing de facto
-// errno_t values are used.
+// of debugging (e.g. strerror()) and testing de facto errno_t values are used.
 
 // #define sqz_err_io            5 // EIO   : I/O error
 // #define sqz_err_too_big       7 // E2BIG : Argument list too long
@@ -54,9 +53,7 @@ struct sqz {
     void*  that;    // convenience for caller i/o override
     void*  padding; // padding for 32-bit compilers with 8 bytes alignment
     struct prob_model  pm_bit0;     // 0..1
-    struct prob_model  pm_bit1;     // 0..1
     struct prob_model  pm_byte;     // single byte
-    struct prob_model  pm_dix;      // 0..3 short distance index
     struct prob_model  pm_len;      // size: 0..255
     struct prob_model  pm_lsb;      // 0..255 distance least significant byte
     struct prob_model  pm_msb;      // 0..255 distance most  significant byte
@@ -375,9 +372,7 @@ static inline uint8_t rc_decode(struct range_coder* rc, struct prob_model* pm) {
 void sqz_init(struct sqz* s, bool compress) {
     rc_init(&s->rc, 0);
     pm_init(&s->pm_bit0, 2);
-    pm_init(&s->pm_bit1, 2);
     pm_init(&s->pm_byte, 256);
-    pm_init(&s->pm_dix,  4);
     pm_init(&s->pm_len, 256);
     pm_init(&s->pm_lsb,  256);
     pm_init(&s->pm_msb,  256);
@@ -498,20 +493,6 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     }
 }
 
-#define sqz_dist_push(d4, dist) do { d4 = (d4 << 16) | dist; } while (0)
-
-static inline uint16_t sqz_dist(uint64_t d4, int ix) {
-    return (uint16_t)(d4 >> (ix << 4));
-}
-
-static inline int sqz_dist_ix(uint64_t d4, uint16_t dist) {
-    if (sqz_dist(d4, 0) == dist) { return 0; }
-    if (sqz_dist(d4, 1) == dist) { return 1; }
-    if (sqz_dist(d4, 2) == dist) { return 2; }
-    if (sqz_dist(d4, 3) == dist) { return 3; }
-    return -1;
-}
-
 #define sqz_update_incoming_leaving(incoming, leaving, in, i, n4, w) do {   \
     incoming >>= 8;                                                         \
     if (i < n4) {                                                           \
@@ -548,7 +529,6 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         rc_encode(&s->rc, &s->pm_bit0, 1);
         rc_encode(&s->rc, &s->pm_byte, in[0]);
     }
-    uint64_t d4 = UINT64_MAX; // cache of last 4 distances
     uint32_t incoming = *(uint32_t*)in;
     uint32_t leaving = incoming;
     sqz_insert(s, in, n, w, 0, incoming, leaving);
@@ -560,30 +540,17 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         size_t dist = 0;
         sqz_find(s, in, n, w, i, incoming, &len, &dist);
         assert(dist == 0 || 1 <= dist && dist <= UINT16_MAX + 1);
-        if (len == 0 || len == 2) { // encode literal byte
+        if (len == 0 || len == 2 && dist > 8) { // encode literal byte
             len = 0;
             sqz_encode_byte(s, incoming);
         } else {
+            assert(len >= 2);
             dist--; // [0..UINT16_MAX]
             assert(dist <= UINT16_MAX);
-            int dix = sqz_dist_ix(d4, (uint16_t)dist);
-            if (len >= 2 && dix >= 0) {
-                rc_encode(&s->rc, &s->pm_bit0, 0);
-                rc_encode(&s->rc, &s->pm_bit1, 0);
-                rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
-                rc_encode(&s->rc, &s->pm_dix,  (uint8_t)dix);
-                sqz_dist_push(d4, dist);
-            } else if (len >= 2) {
-                rc_encode(&s->rc, &s->pm_bit0, 0);
-                rc_encode(&s->rc, &s->pm_bit1, 1);
-                rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
-                rc_encode(&s->rc, &s->pm_lsb,  (uint8_t)(dist & 0xFF));
-                rc_encode(&s->rc, &s->pm_msb,  (uint8_t)(dist >> 8));
-                sqz_dist_push(d4, dist);
-            } else {
-                len = 0;
-                sqz_encode_byte(s, incoming);
-            }
+            rc_encode(&s->rc, &s->pm_bit0, 0);
+            rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
+            rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
+            rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
         }
         sqz_insert_next(s, in, n4, w, i, len, incoming, leaving);
     }
@@ -593,7 +560,6 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         i++;
     }
     rc_encode(&s->rc, &s->pm_bit0, 0);
-    rc_encode(&s->rc, &s->pm_bit1, 0);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
 }
@@ -603,7 +569,6 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
     for (size_t i = 0; i < sizeof(s->rc.code); i++) {
         s->rc.code = (s->rc.code << 8) + s->rc.read(&s->rc);
     }
-    uint64_t d4 = UINT64_MAX; // cache of last 4 distances
     uint8_t* d = (uint8_t*)data;
     size_t i = 0;
     while (s->rc.error == 0) {
@@ -616,20 +581,10 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
                 s->rc.error = ENOBUFS;
             }
         } else {
-            uint8_t  len;
-            uint32_t dist;
-            const uint8_t bit1 = rc_decode(&s->rc, &s->pm_bit1);
-            if (bit1) {
-                len  = rc_decode(&s->rc, &s->pm_len);
-                dist = rc_decode(&s->rc, &s->pm_lsb);
-                dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
-            } else {
-                len = rc_decode(&s->rc, &s->pm_len);
-                if (len == 0xFF) { break; }
-                const int dix = rc_decode(&s->rc, &s->pm_dix);
-                dist = sqz_dist(d4, dix);
-            }
-            sqz_dist_push(d4, dist);
+            uint8_t len = rc_decode(&s->rc, &s->pm_len);
+            if (len == 0xFF) { break; }
+            uint32_t dist = rc_decode(&s->rc, &s->pm_lsb) |
+                (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
             dist++;
             if (s->rc.error == 0) {
                 const size_t n = i + len;

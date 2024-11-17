@@ -14,8 +14,7 @@ enum {
 
 // See: posix errno.h https://pubs.opengroup.org/onlinepubs/9699919799/
 // Range coder errors can be any values != 0 but for the convenience
-// of debugging (e.g. strerror()) and testing de facto
-// errno_t values are used.
+// of debugging (e.g. strerror()) and testing de facto errno_t values are used.
 
 // #define sqz_err_io            5 // EIO   : I/O error
 // #define sqz_err_too_big       7 // E2BIG : Argument list too long
@@ -54,9 +53,7 @@ struct sqz {
     void*  that;    // convenience for caller i/o override
     void*  padding; // padding for 32-bit compilers with 8 bytes alignment
     struct prob_model  pm_bit0;     // 0..1
-    struct prob_model  pm_bit1;     // 0..1
     struct prob_model  pm_byte;     // single byte
-    struct prob_model  pm_dix;      // 0..3 short distance index
     struct prob_model  pm_len;      // size: 0..255
     struct prob_model  pm_lsb;      // 0..255 distance least significant byte
     struct prob_model  pm_msb;      // 0..255 distance most  significant byte
