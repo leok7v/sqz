@@ -60,7 +60,6 @@ struct sqz {
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
     size_t prev[sqz_max_window];    // previous `i` of 4 bytes entry
-    size_t map2[((size_t)UINT16_MAX) + 1]; // `i` + 1 of 2 bytes
     struct map map3;
     struct map map4;
     // entries for the maps (75% occupancy):
@@ -118,7 +117,7 @@ static_assert(sizeof(int) >= 4, "32 bits minimum"); // 16 bit int unsupported
 #define countof(a) (sizeof(a) / sizeof((a)[0]))
 #endif
 
-enum { sqz_min_len =   2 };
+enum { sqz_min_len =   3 };
 enum { sqz_max_len = 254 };
 
 static void map_init(struct map* m, void** p, size_t n, size_t b) {
@@ -379,7 +378,6 @@ void sqz_init(struct sqz* s, bool compress) {
     // TODO: may as well have separate compressor/decompressor types
     if (compress) {
         memset(s->prev, 0, sizeof(s->prev));
-        memset(s->map2, 0, sizeof(s->map2));
         map_init(&s->map3, s->map3e, sizeof(s->map3e) / sizeof(s->map3e[0]), 3);
         map_init(&s->map4, s->map4e, sizeof(s->map4e) / sizeof(s->map4e[0]), 4);
     }
@@ -429,7 +427,6 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
                 s->prev[index] = 0;
             }
         }
-        s->map2[ b4 & 0xFFFFu] = i + 1;
     }
 }
 
@@ -478,13 +475,6 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
         if (b) {
             size_t p = (const uint8_t*)s->map3.p[ix] - in;
             if (i - p <= w) { len = 3; dst = i - p; }
-        }
-    }
-    if (len == 0) {
-        size_t p = s->map2[b4 & 0xFFFF];
-        if (p > 0) {
-            p--; // because map2[] keep position + 1
-            if (i - p <= w) { len = 2; dst = i - p; }
         }
     }
     if (len > 0) {
@@ -540,11 +530,11 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         size_t dist = 0;
         sqz_find(s, in, n, w, i, incoming, &len, &dist);
         assert(dist == 0 || 1 <= dist && dist <= UINT16_MAX + 1);
-        if (len == 0 || len == 2 && dist > 8) { // encode literal byte
+        if (len == 0 || len == 3 && dist > 0xFF) { // encode literal byte
             len = 0;
             sqz_encode_byte(s, incoming);
         } else {
-            assert(len >= 2);
+//          printf("\"%.*s\" \"%.*s\" %zd:%zd\n", (int)len, in + i, (int)len, in + i - dist, len, dist);
             dist--; // [0..UINT16_MAX]
             assert(dist <= UINT16_MAX);
             rc_encode(&s->rc, &s->pm_bit0, 0);

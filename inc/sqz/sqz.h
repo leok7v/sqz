@@ -60,7 +60,6 @@ struct sqz {
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
     size_t prev[sqz_max_window];    // previous `i` of 4 bytes entry
-    size_t map2[((size_t)UINT16_MAX) + 1]; // `i` + 1 of 2 bytes
     struct map map3;
     struct map map4;
     // entries for the maps (75% occupancy):

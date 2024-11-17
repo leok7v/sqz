@@ -76,13 +76,9 @@ static double pm_entropy(struct prob_model* pm) {
 }
 
 static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
-    uint64_t total =
-        pm_sum(&s->pm_bit0) +
-        pm_sum(&s->pm_byte) +
-        pm_sum(&s->pm_len)  +
-        pm_sum(&s->pm_lsb)  +
-        pm_sum(&s->pm_msb);
-    printf("of: %s matches %s -> %s\n", thousands(total), thousands(bytes), thousands(compressed));
+    uint64_t total = pm_sum(&s->pm_byte) + pm_sum(&s->pm_len); // number of matches
+    printf("of: %s matches %s -> %s\n",
+           thousands(total), thousands(bytes), thousands(compressed));
     #pragma push_macro("print_entropy")
     #define print_entropy(field) do {                               \
         uint64_t num = pm_n(&s->field);                             \
@@ -294,7 +290,7 @@ int main(int argc, const char* argv[]) {
     printf("Window: 2^%d %d sizeof(size_t): %d sizeof(int): %d\n",
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int));
     errno_t r = locate_test_folder();
-#if 0
+#if 1
     if (r == 0) {
         uint8_t d[4 * 1024] = {0};
         r = test(null, d, sizeof(d));
@@ -304,12 +300,13 @@ int main(int argc, const char* argv[]) {
         }
         r = test(null, d, sizeof(d));
     }
+#endif
+#if 1
     if (r == 0) {
         const char* d = "Hello World Hello.World Hello World";
         size_t bytes = strlen((const char*)d);
         r = test(null, (const uint8_t*)d, bytes);
     }
-#endif
     if (r == 0 && file_exist(__FILE__)) { // test.c source code:
         r = test_compression(__FILE__);
     }
@@ -349,6 +346,10 @@ int main(int argc, const char* argv[]) {
     for (size_t i = 0; i < sizeof(corpus)/sizeof(corpus[0]) && r == 0; i++) {
         if (file_exist(corpus[i])) { r = test_compression(corpus[i]); }
     }
+#else
+//  if (file_exist("test/silesia.tar")) { r = test_compression("test/silesia.tar"); }
+    if (file_exist("test/bible.txt")) { r = test_compression("test/bible.txt"); }
+#endif
     return r;
 }
 
