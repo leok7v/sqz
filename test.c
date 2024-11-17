@@ -2,9 +2,6 @@
 #include "rt/fileio.h"
 #include "sqz/sqz.h"
 
-#undef  SQUEEZE_MAX_WINDOW
-#define SQUEEZE_MAX_WINDOW
-
 enum { window_bits = 16 };
 
 // window_bits = 16:
@@ -267,6 +264,10 @@ static errno_t test_compression(const char* fn) {
     return test(fn, data, bytes);
 }
 
+static errno_t test_file(const char* fn) {
+    return file_exist(fn) ? test_compression(fn) : 0;
+}
+
 static errno_t locate_test_folder(void) {
     // on Unix systems with "make" executable usually resided
     // and is run from root of repository... On Windows with
@@ -284,7 +285,6 @@ static errno_t locate_test_folder(void) {
     }
 }
 
-
 int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
     printf("Window: 2^%d %d sizeof(size_t): %d sizeof(int): %d\n",
@@ -301,18 +301,18 @@ int main(int argc, const char* argv[]) {
         r = test(null, d, sizeof(d));
     }
 #endif
-#if 1
+#if 0
     if (r == 0) {
         const char* d = "Hello World Hello.World Hello World";
         size_t bytes = strlen((const char*)d);
         r = test(null, (const uint8_t*)d, bytes);
     }
-    if (r == 0 && file_exist(__FILE__)) { // test.c source code:
-        r = test_compression(__FILE__);
+    if (r == 0) { // test.c source code:
+        r = test_file(__FILE__);
     }
     // argv[0] executable filepath (Windows) or possibly name (Unix)
-    if (r == 0 && file_exist(argv[0])) {
-        r = test_compression(argv[0]);
+    if (r == 0) {
+        r = test_file(argv[0]);
     }
     static const char* files[] = {
         "test/bible.txt",
@@ -326,8 +326,8 @@ int main(int argc, const char* argv[]) {
         "test/mandrill.png",
         "test/silesia.tar"
     };
-    for (size_t i = 0; i < sizeof(files)/sizeof(files[0]) && r == 0; i++) {
-        if (file_exist(files[i])) { r = test_compression(files[i]); }
+    for (size_t i = 0; i < countof(files) && r == 0; i++) {
+        r = test_file(files[i]);
     }
     static const char* corpus[] = {
         "test/corpus/dickens.txt",
@@ -343,12 +343,12 @@ int main(int argc, const char* argv[]) {
         "test/corpus/x-ray.dicom",
         "test/corpus/xml.tar",
     };
-    for (size_t i = 0; i < sizeof(corpus)/sizeof(corpus[0]) && r == 0; i++) {
-        if (file_exist(corpus[i])) { r = test_compression(corpus[i]); }
+    for (size_t i = 0; i < countof(corpus) && r == 0; i++) {
+        r = test_file(corpus[i]);
     }
 #else
-//  if (file_exist("test/silesia.tar")) { r = test_compression("test/silesia.tar"); }
-    if (file_exist("test/bible.txt")) { r = test_compression("test/bible.txt"); }
+//  r = test_file("test/silesia.tar");
+    r = test_file("test/bible.txt");
 #endif
     return r;
 }
