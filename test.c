@@ -81,9 +81,10 @@ static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
         pm_sum(&s->pm_bit1) +
         pm_sum(&s->pm_bit2) +
         pm_sum(&s->pm_bit3) +
-        pm_sum(&s->pm_size) +
         pm_sum(&s->pm_byte) +
-        pm_sum(&s->pm_l3d ) +
+        pm_sum(&s->pm_l3d)  +
+        pm_sum(&s->pm_dix)  +
+        pm_sum(&s->pm_size) +
         pm_sum(&s->pm_lsb ) +
         pm_sum(&s->pm_msb );
     printf("of: %s matches %s -> %s\n", thousands(total), thousands(bytes), thousands(compressed));
@@ -101,11 +102,12 @@ static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
     print_entropy(pm_bit1);
     print_entropy(pm_bit2);
     print_entropy(pm_bit3);
-    print_entropy(pm_size);
     print_entropy(pm_byte);
-    print_entropy(pm_l3d );
-    print_entropy(pm_lsb );
-    print_entropy(pm_msb );
+    print_entropy(pm_l3d);
+    print_entropy(pm_dix);
+    print_entropy(pm_size);
+    print_entropy(pm_lsb);
+    print_entropy(pm_msb);
     #pragma pop_macro("print_entropy")
 }
 
@@ -127,6 +129,7 @@ static void put(struct range_coder* rc, uint8_t b) {
 
 static errno_t compress(const char* from, const char* to,
                         const uint8_t* data, size_t bytes) {
+    uint64_t dt = 0; // elapsed time in nanoseconds;
     struct io out = {0}; // compressed file
     io_create(&out, to);
     if (out.error != 0) {
@@ -141,7 +144,9 @@ static errno_t compress(const char* from, const char* to,
     if (encoder.rc.error != 0) {
         printf("io_create(\"%s\") failed: %s\n", to, strerror(encoder.rc.error));
     } else {
+        uint64_t t = nanoseconds();
         sqz_compress(&encoder, data, bytes, 1u << window_bits);
+        dt = nanoseconds() - t;
         if (encoder.rc.error != 0) {
             printf("Failed to compress: %s\n", strerror(encoder.rc.error));
         }
@@ -161,12 +166,14 @@ static errno_t compress(const char* from, const char* to,
         double bps = out.written * 8.0   / bytes; // bits per symbol
         printf("bps: %4.1f ", bps);
         if (from != null) {
-            printf("%7lld -> %7lld %6.2f%% of \"%s\"\n",
+            printf("%7lld -> %7lld %6.2f%% of \"%s\" ",
                   (uint64_t)bytes, out.written, pc, fn);
         } else {
-            printf("%7lld -> %7lld %6.2f%%\n\n",
+            printf("%7lld -> %7lld %6.2f%% ",
                   (uint64_t)bytes, out.written, pc);
         }
+        printf("Time: %.3fs Bitrate: %.3f MiB/s\n",
+                dt / 1.0e9, bytes / (dt / 1.0e9) / (1024 * 1024));
     }
     return encoder.rc.error;
 }
@@ -228,7 +235,9 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
     }
     if (decoder.rc.error == 0) {
         swear(bytes == size);
-        sqz_decompress(&decoder, out.data, (size_t)bytes);
+        uint64_t t = nanoseconds();
+        uint64_t decompressed = sqz_decompress(&decoder, out.data, (size_t)bytes);
+        t = nanoseconds() - t;
         if (decoder.rc.error == 0) {
             const bool same = size == bytes &&
                        memcmp(input, out.data, (size_t)bytes) == 0;
@@ -243,7 +252,10 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
             }
             swear(same); // to trigger breakpoint while debugging
         }
+        swear(decompressed == bytes);
         swear(decoder.rc.error == 0);
+        printf("Decompress Time: %.3fs Bitrate: %.3f MiB/s\n",
+               t / 1.0e9, size / (t / 1.0e9) / (1024 * 1024));
     }
     io_close(&out);
     io_close(&in);

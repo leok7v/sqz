@@ -52,15 +52,15 @@ struct map {
 struct sqz {
     struct range_coder rc; // must be first field for callbacks
     void*  that;    // convenience for caller i/o override
-    void*  padding; // padding for 32-bit compilers with 8 bytes allignment
+    void*  padding; // padding for 32-bit compilers with 8 bytes alignment
     struct prob_model  pm_bit0;     // 0..1
     struct prob_model  pm_bit1;     // 0..1
     struct prob_model  pm_bit2;     // 0..1
     struct prob_model  pm_bit3;     // 0..1
-    struct prob_model  pm_size;     // size: 0..255
     struct prob_model  pm_byte;     // single byte
-    struct prob_model  pm_l3d;      // 0..7   len == 3 distance
+    struct prob_model  pm_l3d;      // 0..7 len == 3 distance
     struct prob_model  pm_dix;      // 0..3 short distance index
+    struct prob_model  pm_size;     // size: 0..255
     struct prob_model  pm_lsb;      // 0..255 distance least significant byte
     struct prob_model  pm_msb;      // 0..255 distance most  significant byte
     // TODO: we may have 2 types decompressor and compressor
@@ -381,10 +381,10 @@ void sqz_init(struct sqz* s, bool compress) {
     pm_init(&s->pm_bit1, 2);
     pm_init(&s->pm_bit2, 2);
     pm_init(&s->pm_bit3, 2);
-    pm_init(&s->pm_size, 256);
     pm_init(&s->pm_byte, 256);
     pm_init(&s->pm_l3d,  256);
     pm_init(&s->pm_dix,  4);
+    pm_init(&s->pm_size, 256);
     pm_init(&s->pm_lsb,  256);
     pm_init(&s->pm_msb,  256);
     // TODO: may as well have separate compressor/decompressor types
@@ -591,7 +591,7 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
                 rc_encode(&s->rc, &s->pm_bit2, 1);
                 rc_encode(&s->rc, &s->pm_bit3, 0);
                 rc_encode(&s->rc, &s->pm_size, (uint8_t)len);
-                rc_encode(&s->rc, &s->pm_dix,  (uint8_t)(dix));
+                rc_encode(&s->rc, &s->pm_dix,  (uint8_t)dix);
                 sqz_dist_push(d4, dist);
             } else if (len > 3) {
                 rc_encode(&s->rc, &s->pm_bit0, 0);
@@ -655,16 +655,16 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
                 sqz_dist_push(d4, dist);
             } else {
                 assert(bits == 0b110);
-                bits |= (rc_decode(&s->rc, &s->pm_bit3) << 3);
-                size  =  rc_decode(&s->rc, &s->pm_size);
-                if (size == 0xFF) { break; }
-                if (bits == 0b0110) {
+                const uint8_t bit3 = rc_decode(&s->rc, &s->pm_bit3);
+                if (bit3) {
+                    size  = rc_decode(&s->rc, &s->pm_size);
+                    dist  = rc_decode(&s->rc, &s->pm_lsb);
+                    dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
+                } else {
+                    size = rc_decode(&s->rc, &s->pm_size);
+                    if (size == 0xFF) { break; }
                     const int dix = rc_decode(&s->rc, &s->pm_dix);
                     dist = sqz_dist(d4, dix);
-                } else {
-                    assert(bits == 0b1110);
-                    dist = rc_decode(&s->rc, &s->pm_lsb);
-                    dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
                 }
                 sqz_dist_push(d4, dist);
             }
