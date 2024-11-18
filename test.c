@@ -297,6 +297,72 @@ static errno_t locate_test_folder(void) {
     }
 }
 
+/////////////////////////////
+static struct {
+    uint8_t data[1024];
+    size_t  written;
+    size_t  bytes;
+} io;
+
+static void put_byte(struct range_coder* rc, uint8_t b) {
+    (void)rc; // `rc` unused. No bounds check:
+    io.data[io.written++] = b;
+}
+
+static uint8_t get_byte(struct range_coder* rc) {
+    (void)rc; // `rc` unused. No bounds check:
+    return io.data[io.bytes++];
+}
+
+static errno_t lorem_ipsum(void) {
+    const char* text = "Lorem ipsum dolor sit amet. "
+                       "Lorem ipsum dolor sit amet. "
+                       "Lorem ipsum dolor sit amet. ";
+    size_t input_size = strlen(text);
+    uint64_t compressed_size = 0;
+    {
+        static struct sqz compress;
+        compress.that = 0;
+        assert(sizeof(io.data) > input_size * 2);
+        sqz_init(&compress);
+        compress.rc.write = put_byte;
+        // window_bits: 11 (2KB)
+        sqz_compress(&compress, text, input_size, 1u << 11);
+        if (compress.rc.error != 0) {
+            printf("Compression error: %d\n", compress.rc.error);
+            return compress.rc.error;
+        }
+        compressed_size = io.written;
+        printf("%d into %d bytes\n", (int)input_size, (int)compressed_size);
+    }
+    {
+        static char decompressed_data[1024];
+        static struct sqz decompress;
+        assert(sizeof(decompressed_data) > input_size);
+        sqz_init(&decompress);
+        decompress.rc.read = get_byte;
+        uint64_t decompressed = sqz_decompress(&decompress, decompressed_data,
+                                               input_size);
+        if (decompress.rc.error != 0) {
+            printf("Decompression error: %d\n", decompress.rc.error);
+            return decompress.rc.error;
+        } else {
+            if (decompressed != strlen(text)) {
+                printf("Decompressed size does not match original size\n");
+                return EINVAL;
+            }
+        }
+        if (memcmp(decompressed_data, text, (size_t)decompressed) != 0) {
+            printf("Decompressed data does not match original data\n");
+            return EINVAL;
+        }
+        printf("Decompression successful.\n");
+    }
+    return 0;
+}
+/////////////////////
+
+
 int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
     printf("Window: 2^%d %d sizeof(size_t): %d sizeof(int): %d sizeof(long): "
@@ -304,7 +370,7 @@ int main(int argc, const char* argv[]) {
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int),
             sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
-#if 0
+#if 1
     if (r == 0) {
         uint8_t d[4 * 1024] = {0};
         r = test(null, d, sizeof(d));
@@ -315,7 +381,7 @@ int main(int argc, const char* argv[]) {
         r = test(null, d, sizeof(d));
     }
 #endif
-#if 0
+#if 1
     if (r == 0) {
         const char* d = "Hello World Hello.World Hello World";
         size_t bytes = strlen((const char*)d);
@@ -364,6 +430,7 @@ int main(int argc, const char* argv[]) {
 //  r = test_file("test/silesia.tar");
     r = test_file("test/bible.txt");
 #endif
+    r = lorem_ipsum();
     return r;
 }
 

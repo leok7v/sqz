@@ -565,6 +565,8 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
             len = 0;
             sqz_encode_byte(s, incoming);
         } else {
+//          printf("\"%.*s\" \"%.*s\" %zd:%zd\n", (int)len, in + i,
+//                              (int)len, in + i - dist, len, dist);
             dist--; // [0..UINT16_MAX]
             rc_encode(&s->rc, &s->pm_bit0, 0);
             rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
@@ -609,16 +611,18 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
             uint8_t len = rc_decode(&s->rc, &s->pm_len);
             uint32_t dist;
             if (len == 0xFF) { break; }
+            assert(sqz_min_len <= len && len <= sqz_max_len);
             if (len <= 4) {
                 dist = rc_decode(&s->rc, &s->pm_dist[len - 2]);
             } else {
-                dist = rc_decode(&s->rc, &s->pm_lsb) |
-                    (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
+                dist  = rc_decode(&s->rc, &s->pm_lsb);
+                dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
             }
             dist++;
             if (s->rc.error == 0) {
                 const size_t n = i + len;
                 if (i < dist) {
+//                  printf("[%zd] len %u dist %u\n", i, len, dist);
                     s->rc.error = ERANGE;
                 } else if (i >= dist && n <= bytes) {
                     // memcpy() cannot be used on overlapped regions
