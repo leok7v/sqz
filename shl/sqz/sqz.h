@@ -551,22 +551,33 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     uint32_t leaving = incoming;
     sqz_insert(s, in, n, w, 0, incoming, leaving);
     size_t i = 1;
+size_t count2 = 0;
+size_t count3 = 0;
+size_t count4 = 0;
     const size_t n4 = n - 4;
+    size_t last = 0; // position of the byte following last match
     sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
     while (i < n4) {
         size_t len = 0;
         size_t dist = 0;
         sqz_find(s, in, n, w, i, incoming, &len, &dist);
+if (len == 4) count4++;
+if (len == 3) count3++;
+if (len == 2) count2++;
         assert(dist == 0 || 1 <= dist && dist <= UINT16_MAX + 1);
         bool too_far = len == 2 && dist > 0x7  ||
                        len == 3 && dist > 0x7F ||
                        len == 4 && dist > 0xFF;
         if (len == 0 || too_far) { // encode literal byte
             len = 0;
-            sqz_encode_byte(s, incoming);
+            uint8_t c = (uint8_t)incoming; // Note 2: "funny xor thing"
+//          if (last) { c ^= in[last]; }
+            sqz_encode_byte(s, c);
+            last = 0;
         } else {
 //          printf("\"%.*s\" \"%.*s\" %zd:%zd\n", (int)len, in + i,
 //                              (int)len, in + i - dist, len, dist);
+            last = i - dist + len;
             dist--; // [0..UINT16_MAX]
             rc_encode(&s->rc, &s->pm_bit0, 0);
             rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
@@ -589,6 +600,7 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     rc_encode(&s->rc, &s->pm_bit0, 0);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
+    printf("counts: %zd %zd %zd\n", count2, count3, count4);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
@@ -596,6 +608,7 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
     for (size_t i = 0; i < sizeof(s->rc.code); i++) {
         s->rc.code = (s->rc.code << 8) + s->rc.read(&s->rc);
     }
+    size_t last = 0; // position of the byte following last match
     uint8_t* d = (uint8_t*)data;
     size_t i = 0;
     while (s->rc.error == 0) {
@@ -603,10 +616,14 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
         if (s->rc.error != 0) { break; }
         if (bit0) {
             if (i < bytes) {
-                d[i++] = rc_decode(&s->rc, &s->pm_byte);
+                uint8_t c = rc_decode(&s->rc, &s->pm_byte);
+//              if (last) { c ^= d[last]; }
+                d[i++] = c;
+                last = 0;
             } else {
                 s->rc.error = ENOBUFS;
             }
+            last = 0;
         } else {
             uint8_t len = rc_decode(&s->rc, &s->pm_len);
             uint32_t dist;
@@ -619,6 +636,7 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
                 dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
             }
             dist++;
+            last = i - dist + len;
             if (s->rc.error == 0) {
                 const size_t n = i + len;
                 if (i < dist) {
@@ -647,6 +665,30 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
 //    dist  = rc_decode(&s->rc, &s->pm_lsb)
 //         |  (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
 // may not work and it did not in x86 release.
+
+// Note 2:
+// "funny xor thing" in
+// https://cbloomrants.blogspot.com/2014/06/06-12-14-some-lzma-notes.html
+// https://cbloomrants.blogspot.com/2010/08/08-20-10-deobfuscating-lzma.html
+// without XOR:
+// 4,436,173   -> 1,343,976    30.30% of "bible.txt"
+// pm_byte[ 80]: 4.33 bits  32.70%   9.24%    229,608
+// with XOR:
+// 4,436,173   -> 1,366,965    30.81% of "bible.txt"
+// pm_byte[148]: 6.01 bits  32.70%  12.62%    229,608
+
+// Note 3:
+// https://cbloomrants.blogspot.com/2008/10/10-01-08-first-look-at-lzma.html
+// https://cbloomrants.blogspot.com/2010/08/08-20-10-deobfuscating-lzma.html
+// https://cbloomrants.blogspot.com/2012/10/10-02-12-small-note-on-lzham.html
+// https://cbloomrants.blogspot.com/2014/06/06-12-14-some-lzma-notes.html
+// https://cbloomrants.blogspot.com/2014/06/06-16-14-rep0-exclusion-in-lzma-like.html
+// https://cbloomrants.blogspot.com/2016/06/06-09-16-fundamentals-of-modern-lz-two.html
+// https://cbloomrants.blogspot.com/2017/07/09-27-08-2.html
+// https://cbloomrants.blogspot.com/2015/01/01-23-15-lza-new-optimal-parse.html
+
+// TODO:
+// prev[] can be a balanced tree (will it speed up?)
 
 #endif // sqz_implementation
 

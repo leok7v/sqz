@@ -370,7 +370,7 @@ int main(int argc, const char* argv[]) {
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int),
             sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
-#if 1
+#if 0
     if (r == 0) {
         uint8_t d[4 * 1024] = {0};
         r = test(null, d, sizeof(d));
@@ -381,7 +381,7 @@ int main(int argc, const char* argv[]) {
         r = test(null, d, sizeof(d));
     }
 #endif
-#if 1
+#if 0
     if (r == 0) {
         const char* d = "Hello World Hello.World Hello World";
         size_t bytes = strlen((const char*)d);
@@ -426,11 +426,11 @@ int main(int argc, const char* argv[]) {
     for (size_t i = 0; i < countof(corpus) && r == 0; i++) {
         r = test_file(corpus[i]);
     }
+    r = lorem_ipsum();
 #else
 //  r = test_file("test/silesia.tar");
     r = test_file("test/bible.txt");
 #endif
-    r = lorem_ipsum();
     return r;
 }
 
