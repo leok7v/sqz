@@ -52,9 +52,21 @@
 #define DEBUG // clang & gcc toolchains use DEBUG, Microsoft _DEBUG
 #endif
 
-#define null ((void*)0) // like null_ptr better than NULL (0)
+// TODO: custom prefix instead of rt_ and shorthand enable (default) disable
 
-#define rt_countof(a) (sizeof(a) / sizeof((a)[0]))
+#ifndef __cplusplus
+#define null_ptr ((void*)0) // like null_ptr better than NULL (0)
+#endif
+
+#define null null_ptr
+
+#define rt_is_pointer(p) _Generic(&(p), typeof(*p)**: 1, default: 0)
+
+#define rt_sizeof_array_element(a) (!rt_is_pointer(a) ? sizeof((a)[0]) : 0)
+
+#define rt_countof(a) (sizeof(a) / rt_sizeof_array_element(a))
+
+// see: https://godbolt.org/z/3M8Wvqsse
 
 #ifndef __cplusplus
 #include "rt_generics.h"
@@ -116,7 +128,11 @@ int32_t rt_printf_implementation(const char* file, int32_t line,
 
 #include <intrin.h>
 
+#if defined(_WIN64) || defined(__x86_64__) || defined(__ppc64__) || defined(__aarch64__)
+#pragma intrinsic(_BitScanReverse, _BitScanReverse64)
+#else
 #pragma intrinsic(_BitScanReverse)
+#endif
 
 static inline int rt_log2_32(uint32_t x) {
 //  assert(x != 0);
@@ -127,9 +143,17 @@ static inline int rt_log2_32(uint32_t x) {
 
 static inline int rt_log2_64(uint64_t x) {
 //  assert(x != 0);
-    unsigned long index;
-    _BitScanReverse64(&index, x);
-    return (int)index;
+    #if defined(_WIN64) || defined(__x86_64__) || defined(__ppc64__) || defined(__aarch64__)
+        unsigned long index;
+        _BitScanReverse64(&index, x);
+        return (int)index;
+    #else
+        if (x > (uint64_t)UINT32_MAX) {
+            return rt_log2_32((uint32_t)(x >> 32)) + 32;
+        } else {
+            return rt_log2_32((uint32_t)x);
+        }
+    #endif
 }
 
 static inline int rt_count_leading_zeros(uint32_t x) {
@@ -194,7 +218,7 @@ static void rt_output_line(const char* s) {
         if (!setlocale_called) { SetConsoleOutputCP(CP_UTF8); }
         WCHAR utf16[4096];
         int n = MultiByteToWideChar(CP_UTF8, 0, s, -1,
-                                    utf16, rt_countof(utf16) - 1);
+                                    utf16, (int)rt_countof(utf16) - 1);
         if (n > 0) {
             utf16[rt_countof(utf16) - 1] = 0x00;
             OutputDebugStringW(utf16);
