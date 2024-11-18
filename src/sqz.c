@@ -518,7 +518,7 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
             if (len <= 4) {
                 dist = rc_decode(&s->rc, &s->pm_dist[len - 2]);
             } else {
-                dist  = rc_decode(&s->rc, &s->pm_lsb);
+                dist  = rc_decode(&s->rc, &s->pm_lsb); // See Note 1
                 dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
             }
             dist++;
@@ -540,3 +540,13 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
     }
     return i;
 }
+
+// Note 1:
+// In C, the arguments to the bitwise OR operator (|) are evaluated
+// in an unspecified order, meaning the compiler is free to evaluate
+// the left-hand or right-hand operand first. This behavior can lead
+// to issues if the two operands have side effects that depend on a
+// specific order of evaluation.
+//    dist  = rc_decode(&s->rc, &s->pm_lsb)
+//         |  (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
+// may not work and it did not in x86 release.
