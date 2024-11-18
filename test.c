@@ -90,14 +90,12 @@ static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
     #define print_entropy(field) print_field_entropy(#field, field)
     print_entropy(pm_bit0);
     print_entropy(pm_byte);
+    print_entropy(pm_tag);
+    print_entropy(pm_dist);
+    print_entropy(pm_dix);
     print_entropy(pm_len);
     print_entropy(pm_lsb);
     print_entropy(pm_msb);
-    for (size_t i = 0; i < countof(s->pm_dist); i++) {
-        char name[16] = { 0 };
-        snprintf(name, sizeof(name), "pm_dist[%d]", (int)i);
-        print_field_entropy(name, pm_dist[i]);
-    }
     #pragma pop_macro("print_entropy")
     #pragma pop_macro("print_field_entropy")
 }
@@ -249,7 +247,7 @@ printf("decompressed: %lld bytes: %lld\n", decompressed, bytes);
         }
         swear(decompressed == bytes);
         swear(decoder.rc.error == 0);
-        printf("decompress time: %.3fs bitrate: %.1f MiB/s\n",
+        printf("decompress time: %6.3fs bitrate: %.1f MiB/s\n",
                t / 1.0e9, size / (t / 1.0e9) / (1024 * 1024));
     }
     io_close(&out);
@@ -428,8 +426,11 @@ int main(int argc, const char* argv[]) {
     }
     r = lorem_ipsum();
 #else
-//  r = test_file("test/silesia.tar");
-    r = test_file("test/bible.txt");
+    r = test_file("test/silesia.tar");
+//  r = test_file("test/bible.txt");
+//  r = test_file("test/arm64.elf");
+//  r = test_file("test/hhgttg.txt");
+//  r = test_file("test/corpus/mozilla.tar");
 #endif
     return r;
 }
@@ -445,6 +446,15 @@ compress
 time: 20.172s bitrate: 10.0 MiB/s
 decompress
 time:  4.858s bitrate: 41.4 MiB/s
+
+with last_dist[len] index:
+
+211,087,360 -> 69,864,573   33.10% of "silesia.tar"
+compress
+time: 21.525s bitrate: 9.4 MiB/s
+decompress
+time:  6.206s bitrate: 32.4 MiB/s
+
 
 compare to:
 https://github.com/inikep/lzbench/blob/master/lzbench18_sorted.md

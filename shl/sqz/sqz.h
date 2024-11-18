@@ -54,10 +54,12 @@ struct sqz {
     void*  padding; // padding for 32-bit compilers with 8 bytes alignment
     struct prob_model  pm_bit0;     // 0..1
     struct prob_model  pm_byte;     // single byte
-    struct prob_model  pm_len;      // size: 0..255
+    struct prob_model  pm_tag;      // 0..7 (len << 1) | dix (for len <= 4)
+    struct prob_model  pm_dist;     // 0..255 len:2 distance probability model
+    struct prob_model  pm_dix;      // 0..3 last distance index
+    struct prob_model  pm_len;      // len: 5..255
     struct prob_model  pm_lsb;      // 0..255 distance least significant byte
     struct prob_model  pm_msb;      // 0..255 distance most  significant byte
-    struct prob_model  pm_dist[3];  // len:2,3,4 distance probability models
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
     size_t prev[sqz_max_window];    // previous `i` of 4 bytes entry
@@ -121,19 +123,13 @@ static_assert(sizeof(int) >= 4, "32 bits minimum"); // 16 bit int unsupported
 
 enum { sqz_min_len =   2 };
 enum { sqz_max_len = 254 };
-enum { sqz_max_len2_dist = 0x7  };
-enum { sqz_max_len3_dist = 0x7F };
-enum { sqz_max_len4_dist = 0xFF };
+enum { sqz_max_len2_dist = 0xFF };
 
 // must be power of 2 - 1:
 static_assert(((sqz_max_len2_dist + 1) & sqz_max_len2_dist) == 0, "");
-static_assert(((sqz_max_len3_dist + 1) & sqz_max_len3_dist) == 0, "");
-static_assert(((sqz_max_len4_dist + 1) & sqz_max_len4_dist) == 0, "");
 
 // must fit into 8 bits:
 static_assert(sqz_max_len2_dist <= 0xFF, "");
-static_assert(sqz_max_len3_dist <= 0xFF, "");
-static_assert(sqz_max_len4_dist <= 0xFF, "");
 
 static void map_init(struct map* m, void** p, size_t n, size_t b) {
     assert(16 < n && n <= (1u << 24) && 3 <= b && b <= 4);
@@ -385,14 +381,14 @@ static inline uint8_t rc_decode(struct range_coder* rc, struct prob_model* pm) {
 
 void sqz_init(struct sqz* s) {
     rc_init(&s->rc, 0);
-    pm_init(&s->pm_bit0, 2);
-    pm_init(&s->pm_byte, 256);
-    pm_init(&s->pm_len,  256);
-    pm_init(&s->pm_lsb,  256);
-    pm_init(&s->pm_msb,  256);
-    pm_init(&s->pm_dist[0], sqz_max_len2_dist + 1);
-    pm_init(&s->pm_dist[1], sqz_max_len3_dist + 1);
-    pm_init(&s->pm_dist[2], sqz_max_len4_dist + 1);
+    pm_init(&s->pm_bit0,  2);
+    pm_init(&s->pm_byte,  256);
+    pm_init(&s->pm_tag, 8);
+    pm_init(&s->pm_dist,  sqz_max_len2_dist + 1);
+    pm_init(&s->pm_dix,   4);
+    pm_init(&s->pm_len,   256);
+    pm_init(&s->pm_lsb,   256);
+    pm_init(&s->pm_msb,   256);
 }
 
 static void sqz_init_compress(struct sqz* s) {
@@ -551,44 +547,61 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     uint32_t leaving = incoming;
     sqz_insert(s, in, n, w, 0, incoming, leaving);
     size_t i = 1;
-size_t count2 = 0;
-size_t count3 = 0;
-size_t count4 = 0;
+    uint64_t last_dist[256] = {0};
     const size_t n4 = n - 4;
-    size_t last = 0; // position of the byte following last match
     sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
     while (i < n4) {
         size_t len = 0;
         size_t dist = 0;
         sqz_find(s, in, n, w, i, incoming, &len, &dist);
-if (len == 4) count4++;
-if (len == 3) count3++;
-if (len == 2) count2++;
         assert(dist == 0 || 1 <= dist && dist <= UINT16_MAX + 1);
-        bool too_far = len == 2 && dist > 0x7  ||
-                       len == 3 && dist > 0x7F ||
-                       len == 4 && dist > 0xFF;
+        int ix = -1;
+        if (len > 0) {
+            const uint64_t last = last_dist[len];
+            if (dist - 1 == ((last >>  0) & 0xFFFF)) { ix = 0; }
+            if (dist - 1 == ((last >> 16) & 0xFFFF)) { ix = 1; }
+            if (dist - 1 == ((last >> 32) & 0xFFFF)) { ix = 2; }
+            if (dist - 1 == ((last >> 48) & 0xFFFF)) { ix = 3; }
+        }
+        bool too_far = len == 2 && ix < 0 && dist > sqz_max_len2_dist;
         if (len == 0 || too_far) { // encode literal byte
             len = 0;
-            uint8_t c = (uint8_t)incoming; // Note 2: "funny xor thing"
-//          if (last) { c ^= in[last]; }
+            uint8_t c = (uint8_t)incoming;
             sqz_encode_byte(s, c);
-            last = 0;
         } else {
-//          printf("\"%.*s\" \"%.*s\" %zd:%zd\n", (int)len, in + i,
-//                              (int)len, in + i - dist, len, dist);
-            last = i - dist + len;
+//          if (i <= 154) {
+//              printf("[%3zd] %3zd:%3zd 0x%016llx ix: %2d \"%.*s\" \"%.*s\"\n", i, len, dist,
+//                      last_dist[len], ix,
+//                      (int)len, in + i, (int)len, in + i - dist);
+//          }
             dist--; // [0..UINT16_MAX]
             rc_encode(&s->rc, &s->pm_bit0, 0);
-            rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
             if (len <= 4) {
-                assert(dist <= 0xFF);
-                rc_encode(&s->rc, &s->pm_dist[len - 2], (uint8_t)(dist & 0xFF));
+                rc_encode(&s->rc, &s->pm_tag, ((uint8_t)(len - 1)) << 1 | (ix >= 0));
+                if (ix >= 0) {
+                    rc_encode(&s->rc, &s->pm_dix, (uint8_t)ix);
+                } else if (len == 2) {
+                    assert(dist <= UINT8_MAX);
+                    rc_encode(&s->rc, &s->pm_dist, (uint8_t)dist);
+                } else {
+                    assert(dist <= UINT16_MAX);
+                    rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
+                    rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
+                }
             } else {
-                assert(dist <= UINT16_MAX);
-                rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
-                rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
+                rc_encode(&s->rc, &s->pm_tag, ix >= 0);
+                rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
+                if (ix >= 0) {
+                    rc_encode(&s->rc, &s->pm_dix, (uint8_t)ix);
+                } else {
+                    assert(dist <= UINT16_MAX);
+                    rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
+                    rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
+                }
             }
+            last_dist[len] <<= 16;
+            last_dist[len]  |= (uint16_t)dist;
+//          if (i == 154) { printf("last |= %zd 0x%016llX\n", dist, last_dist[len]); }
         }
         sqz_insert_next(s, in, n4, w, i, len, incoming, leaving);
     }
@@ -597,10 +610,10 @@ if (len == 2) count2++;
         rc_encode(&s->rc, &s->pm_byte, in[i]);
         i++;
     }
-    rc_encode(&s->rc, &s->pm_bit0, 0);
+    rc_encode(&s->rc, &s->pm_bit0,  0);
+    rc_encode(&s->rc, &s->pm_tag, 0b00);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
-    printf("counts: %zd %zd %zd\n", count2, count3, count4);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
@@ -608,35 +621,50 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
     for (size_t i = 0; i < sizeof(s->rc.code); i++) {
         s->rc.code = (s->rc.code << 8) + s->rc.read(&s->rc);
     }
-    size_t last = 0; // position of the byte following last match
+    uint64_t last_dist[256] = {0};
     uint8_t* d = (uint8_t*)data;
     size_t i = 0;
     while (s->rc.error == 0) {
+//      if (i == 154) { rt_breakpoint(); }
         const uint8_t bit0 = rc_decode(&s->rc, &s->pm_bit0);
         if (s->rc.error != 0) { break; }
         if (bit0) {
             if (i < bytes) {
-                uint8_t c = rc_decode(&s->rc, &s->pm_byte);
-//              if (last) { c ^= d[last]; }
-                d[i++] = c;
-                last = 0;
+                d[i++] = rc_decode(&s->rc, &s->pm_byte);
             } else {
                 s->rc.error = ENOBUFS;
             }
-            last = 0;
         } else {
-            uint8_t len = rc_decode(&s->rc, &s->pm_len);
             uint32_t dist;
-            if (len == 0xFF) { break; }
-            assert(sqz_min_len <= len && len <= sqz_max_len);
-            if (len <= 4) {
-                dist = rc_decode(&s->rc, &s->pm_dist[len - 2]);
+            uint8_t sh = rc_decode(&s->rc, &s->pm_tag);
+            uint8_t len = (sh >> 1) + 1;
+            if (len == 2) {
+                if (sh & 1) {
+                    uint8_t dix = rc_decode(&s->rc, &s->pm_dix);
+                    dist = (uint32_t)(last_dist[len] >> (16 * dix)) & 0xFFFF;
+                } else {
+                    dist = rc_decode(&s->rc, &s->pm_dist);
+                }
             } else {
-                dist  = rc_decode(&s->rc, &s->pm_lsb); // See Note 1
-                dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
+                if (len == 1) {
+                    len = rc_decode(&s->rc, &s->pm_len);
+                    if (len == 0xFF) { break; }
+                }
+                if (sh & 1) {
+                    uint8_t dix = rc_decode(&s->rc, &s->pm_dix);
+                    dist = (uint32_t)(last_dist[len] >> (16 * dix)) & 0xFFFF;
+                } else {
+                    dist  = rc_decode(&s->rc, &s->pm_lsb); // See Note 1
+                    dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
+                }
             }
+            assert(sqz_min_len <= len && len <= sqz_max_len);
+//          if (i <= 154) {
+//              printf("[%3zd] %3zd:%3zd 0x%016llx \"%.*s\"\n", i, len, dist, last_dist[len], (int)len, d + i - dist);
+//          }
+            last_dist[len] <<= 16;
+            last_dist[len]  |= (uint16_t)dist;
             dist++;
-            last = i - dist + len;
             if (s->rc.error == 0) {
                 const size_t n = i + len;
                 if (i < dist) {
@@ -651,6 +679,10 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
                     s->rc.error = ENOBUFS;
                 }
             }
+//          if (i - len <= 154) {
+//              printf("[%zd] %zd:%zd \"%.*s\" \"%.*s\"\n", i - len, len, dist,
+//                      (int)len, d + i - len, (int)len, d + i - dist - len);
+//          }
         }
     }
     return i;
