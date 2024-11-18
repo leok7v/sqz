@@ -57,11 +57,13 @@ struct sqz {
     struct prob_model  pm_len;      // size: 0..255
     struct prob_model  pm_lsb;      // 0..255 distance least significant byte
     struct prob_model  pm_msb;      // 0..255 distance most  significant byte
+    struct prob_model  pm_dist[3];  // len:2,3,4 distance probability models
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
     size_t prev[sqz_max_window];    // previous `i` of 4 bytes entry
-    struct map map3;
     struct map map4;
+    struct map map3;
+    size_t     map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes
     // entries for the maps (75% occupancy):
     void* map3e[sqz_max_window + sqz_max_window / 2];
     void* map4e[sqz_max_window + sqz_max_window / 2];
@@ -74,7 +76,7 @@ static_assert(offsetof(struct sqz, rc) == 0);
 extern "C" {
 #endif
 
-void     sqz_init(struct sqz* s, bool compress);
+void     sqz_init(struct sqz* s);
 void     sqz_compress(struct sqz* s, const void* d, size_t b, uint32_t window);
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes);
 
@@ -117,7 +119,7 @@ static_assert(sizeof(int) >= 4, "32 bits minimum"); // 16 bit int unsupported
 #define countof(a) (sizeof(a) / sizeof((a)[0]))
 #endif
 
-enum { sqz_min_len =   3 };
+enum { sqz_min_len =   2 };
 enum { sqz_max_len = 254 };
 
 static void map_init(struct map* m, void** p, size_t n, size_t b) {
@@ -368,19 +370,23 @@ static inline uint8_t rc_decode(struct range_coder* rc, struct prob_model* pm) {
     return (uint8_t)sym;
 }
 
-void sqz_init(struct sqz* s, bool compress) {
+void sqz_init(struct sqz* s) {
     rc_init(&s->rc, 0);
     pm_init(&s->pm_bit0, 2);
     pm_init(&s->pm_byte, 256);
-    pm_init(&s->pm_len, 256);
+    pm_init(&s->pm_len,  256);
     pm_init(&s->pm_lsb,  256);
     pm_init(&s->pm_msb,  256);
-    // TODO: may as well have separate compressor/decompressor types
-    if (compress) {
-        memset(s->prev, 0, sizeof(s->prev));
-        map_init(&s->map3, s->map3e, sizeof(s->map3e) / sizeof(s->map3e[0]), 3);
-        map_init(&s->map4, s->map4e, sizeof(s->map4e) / sizeof(s->map4e[0]), 4);
+    for (size_t i = 0; i < _countof(s->pm_dist); i++) {
+        pm_init(&s->pm_dist[i], 256);
     }
+}
+
+static void sqz_init_compress(struct sqz* s) {
+    memset(s->prev, 0, sizeof(s->prev));
+    memset(s->map2, 0, sizeof(s->map2));
+    map_init(&s->map3, s->map3e, sizeof(s->map3e) / sizeof(s->map3e[0]), 3);
+    map_init(&s->map4, s->map4e, sizeof(s->map4e) / sizeof(s->map4e[0]), 4);
 }
 
 static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
@@ -427,6 +433,7 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
                 s->prev[index] = 0;
             }
         }
+        s->map2[ b4 & 0xFFFFu] = i + 1;
     }
 }
 
@@ -477,6 +484,13 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
             if (i - p <= w) { len = 3; dst = i - p; }
         }
     }
+    if (len == 0) {
+        size_t p = s->map2[b4 & 0xFFFF];
+        if (p > 0) {
+            p--; // because map2[] keep position + 1
+            if (i - p <= w) { len = 2; dst = i - p; }
+        }
+    }
     if (len > 0) {
         *ml = len;
         *md = dst;
@@ -507,12 +521,20 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     }                                                                 \
 } while (0)
 
+static int sqz_bits_in_distance(struct sqz* s, size_t len, size_t dist) {
+    const uint64_t total = pm_total_freq(&s->pm_dist[len - 2]);
+    const uint64_t freq  = s->pm_dist[len - 2].freq[dist & 0xFF];
+    assert(freq > 0);
+    return rt_log2(total) - rt_log2(freq) + 1;
+}
+
 void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (n > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
         s->rc.error = E2BIG;
         return;
     }
+    sqz_init_compress(s);
     const uint8_t* in = (const uint8_t*)memory;
     assert(sqz_min_window <= w && w <= sqz_max_window);
     if (n > 0) {
@@ -525,22 +547,45 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     size_t i = 1;
     const size_t n4 = n - 4;
     sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
+    double bits_avg[3] = {0}; // running averages
+    double bits_max[3] = {0};
+    double bits_min[3] = { DBL_MAX, DBL_MAX, DBL_MAX };
     while (i < n4) {
         size_t len = 0;
         size_t dist = 0;
         sqz_find(s, in, n, w, i, incoming, &len, &dist);
         assert(dist == 0 || 1 <= dist && dist <= UINT16_MAX + 1);
-        if (len == 0 || len == 3 && dist > 0xFF) { // encode literal byte
+        bool too_far = len == 2 && dist > 0x7  ||
+                       len == 3 && dist > 0x7F ||
+                       len == 4 && dist > 0xFF;
+        if (len == 0 || too_far) { // encode literal byte
             len = 0;
             sqz_encode_byte(s, incoming);
         } else {
 //          printf("\"%.*s\" \"%.*s\" %zd:%zd\n", (int)len, in + i, (int)len, in + i - dist, len, dist);
             dist--; // [0..UINT16_MAX]
+            if (2 <= len && len <= 4 && dist <= 0xFF) {
+                int bits = sqz_bits_in_distance(s, len, dist);
+                if (bits_min[len - 2] == DBL_MAX) {
+                    bits_avg[len - 2] = bits;
+                    bits_max[len - 2] = bits;
+                    bits_min[len - 2] = bits;
+                } else {
+                    bits_avg[len - 2] = (bits_avg[len - 2] * i + bits) / (i + 1);
+                    bits_max[len - 2] = max(bits, bits_max[len - 2]);
+                    bits_min[len - 2] = min(bits, bits_min[len - 2]);
+                }
+            }
             assert(dist <= UINT16_MAX);
             rc_encode(&s->rc, &s->pm_bit0, 0);
             rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
-            rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
-            rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
+            if (len <= 4) {
+                assert(dist <= 0xFF);
+                rc_encode(&s->rc, &s->pm_dist[len - 2], (uint8_t)(dist & 0xFF));
+            } else {
+                rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
+                rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
+            }
         }
         sqz_insert_next(s, in, n4, w, i, len, incoming, leaving);
     }
@@ -552,6 +597,9 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     rc_encode(&s->rc, &s->pm_bit0, 0);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
+    printf("avg 2: %5.2f 3: %5.2f 4: %5.2f\n", bits_avg[0], bits_avg[1], bits_avg[2]);
+    printf("min 2: %5.2f 3: %5.2f 4: %5.2f\n", bits_min[0], bits_min[1], bits_min[2]);
+    printf("max 2: %5.2f 3: %5.2f 4: %5.2f\n", bits_max[0], bits_max[1], bits_max[2]);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
@@ -572,9 +620,14 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
             }
         } else {
             uint8_t len = rc_decode(&s->rc, &s->pm_len);
+            uint32_t dist;
             if (len == 0xFF) { break; }
-            uint32_t dist = rc_decode(&s->rc, &s->pm_lsb) |
-                (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
+            if (len <= 4) {
+                dist = rc_decode(&s->rc, &s->pm_dist[len - 2]);
+            } else {
+                dist = rc_decode(&s->rc, &s->pm_lsb) |
+                    (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
+            }
             dist++;
             if (s->rc.error == 0) {
                 const size_t n = i + len;

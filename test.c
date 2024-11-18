@@ -76,22 +76,30 @@ static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
     uint64_t total = pm_sum(&s->pm_byte) + pm_sum(&s->pm_len); // number of matches
     printf("of: %s matches %s -> %s\n",
            thousands(total), thousands(bytes), thousands(compressed));
+    #pragma push_macro("print_field_entropy")
     #pragma push_macro("print_entropy")
-    #define print_entropy(field) do {                               \
+    #define print_field_entropy(name, field) do {                   \
         uint64_t num = pm_n(&s->field);                             \
         double   ent = pm_entropy(&s->field);                       \
         uint64_t sum = pm_sum(&s->field);                           \
         double mp =  pm_match_percentage(sum, total);               \
         double sp =  pm_stream_percentage(sum, ent, compressed);    \
-        printf("%-7s[%3d]: %.2f bits %4.1f%% %4.1f%% %10.10s\n",    \
-               #field, num, ent, mp, sp, thousands(sum));           \
+        printf("%-7s[%3d]: %.2f bits %6.2f%% %6.2f%% %10.10s\n",    \
+               name, num, ent, mp, sp, thousands(sum));             \
     } while (0)
+    #define print_entropy(field) print_field_entropy(#field, field)
     print_entropy(pm_bit0);
     print_entropy(pm_byte);
     print_entropy(pm_len);
     print_entropy(pm_lsb);
     print_entropy(pm_msb);
+    for (size_t i = 0; i < countof(s->pm_dist); i++) {
+        char name[16] = { 0 };
+        snprintf(name, sizeof(name), "pm_dist[%d]", (int)i);
+        print_field_entropy(name, pm_dist[i]);
+    }
     #pragma pop_macro("print_entropy")
+    #pragma pop_macro("print_field_entropy")
 }
 
 static uint8_t squeeze_id[8] = { 's', 'q', 'u', 'e', 'e', 'z', 'e', '4' };
@@ -122,7 +130,7 @@ static errno_t compress(const char* from, const char* to,
     static struct sqz encoder; // static for testing, can be heap malloc()-ed
     encoder.that = &out;
     encoder.rc.write = put;
-    sqz_init(&encoder, true);
+    sqz_init(&encoder);
     write_header(&out, bytes);
     if (encoder.rc.error != 0) {
         printf("io_create(\"%s\") failed: %s\n", to, strerror(encoder.rc.error));
@@ -191,7 +199,7 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
     }
     uint64_t bytes = 0;
     static struct sqz decoder; // static to avoid >64KB stack warning
-    sqz_init(&decoder, false);
+    sqz_init(&decoder);
     decoder.that = &in;
     decoder.rc.read = get;
     read_header(&in, &bytes);
@@ -290,7 +298,7 @@ int main(int argc, const char* argv[]) {
     printf("Window: 2^%d %d sizeof(size_t): %d sizeof(int): %d\n",
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int));
     errno_t r = locate_test_folder();
-#if 1
+#if 0
     if (r == 0) {
         uint8_t d[4 * 1024] = {0};
         r = test(null, d, sizeof(d));
@@ -347,11 +355,35 @@ int main(int argc, const char* argv[]) {
         r = test_file(corpus[i]);
     }
 #else
-//  r = test_file("test/silesia.tar");
-    r = test_file("test/bible.txt");
+    r = test_file("test/silesia.tar");
+//  r = test_file("test/bible.txt");
 #endif
     return r;
 }
 
 #define rt_implementation
 #include "rt/rt.h"
+
+
+/*
+
+211,087,360 -> 72,000,153   34.11% of "silesia.tar"
+compress
+time: 20.172s bitrate: 10.0 MiB/s
+decompress
+time:  4.858s bitrate: 41.4 MiB/s
+
+compare to:
+https://github.com/inikep/lzbench/blob/master/lzbench18_sorted.md
+
+dump_entropy of: 49,355,075 matches 211,087,360 -> 72,000,153
+dump_entropy pm_bit0[  2]: 0.89 bits 100.00%   7.64% 49,355,075
+dump_entropy pm_byte[256]: 7.63 bits  69.12%  45.17% 34,112,827
+dump_entropy pm_len [254]: 4.21 bits  30.88%  11.14% 15,242,248
+dump_entropy pm_lsb [256]: 7.76 bits  27.07%  17.99% 13,359,925
+dump_entropy pm_msb [256]: 6.92 bits  27.07%  16.05% 13,359,925
+dump_entropy pm_dist[0][  7]: 2.62 bits   0.23%   0.05%    111,973
+dump_entropy pm_dist[1][127]: 5.80 bits   2.62%   1.30%  1,292,475
+dump_entropy pm_dist[2][255]: 7.34 bits   0.97%   0.61%    477,874
+
+*/

@@ -107,7 +107,7 @@ int32_t rt_printf_implementation(const char* file, int32_t line,
 #endif
 
 #if defined(DEBUG) || defined(_DEBUG)
-#define rt_assert(b, ...) rt_swear(b, __VA_ARGS__)
+#define rt_assert(b, ...) rt_swear(b __VA_OPT__(, __VA_ARGS__))
 #else
 #define rt_assert(b, ...) ((void)(0))
 #endif
@@ -118,24 +118,52 @@ int32_t rt_printf_implementation(const char* file, int32_t line,
 
 #pragma intrinsic(_BitScanReverse)
 
-static inline uint8_t rt_count_leading_zeros(uint32_t x) {
-    if (x != 0) {
-        unsigned long index;
-        _BitScanReverse(&index, x);
-        return (uint8_t)(31 - index);
-    } else {
-        return 32;
-    }
+static inline int rt_log2_32(uint32_t x) {
+//  assert(x != 0);
+    unsigned long index;
+    _BitScanReverse(&index, x);
+    return (int)index;
+}
+
+static inline int rt_log2_64(uint64_t x) {
+//  assert(x != 0);
+    unsigned long index;
+    _BitScanReverse64(&index, x);
+    return (int)index;
+}
+
+static inline int rt_count_leading_zeros(uint32_t x) {
+    return x != 0 ? 31 - rt_log2_32(x) : 32;
+}
+
+static inline int rt_count_leading_zeros64(uint64_t x) {
+    return x != 0 ? 63 - rt_log2_64(x) : 64;
 }
 
 #else
 
-static inline uint8_t rt_count_leading_zeros(uint32_t x) {
-    return x != 0 ? (uint8_t)__builtin_clz(x) : 32;
+static inline int rt_count_leading_zeros(uint32_t x) {
+    return x != 0 ? __builtin_clz(x) : 32;
+}
+
+static inline uint8_t rt_count_leading_zeros64(uint64_t x) {
+    return x != 0 ? __builtin_clzll(x) : 64;
+}
+
+static int rt_log2_32(uint32_t x) {
+    return 31 - rt_count_leading_zeros(x);
+}
+
+static int rt_log2_64(uint64_t x) {
+    return 63 - rt_count_leading_zeros64(x);
 }
 
 #endif
 
+#define rt_log2(x) _Generic((x),  \
+    uint32_t: rt_log2_32,         \
+    uint64_t: rt_log2_64          \
+)(x)
 
 #endif // rt_header_included
 

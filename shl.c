@@ -30,7 +30,7 @@ static errno_t lorem_ipsum(void) {
         static struct sqz compress;
         compress.that = 0;
         assert(sizeof(io.data) > input_size * 2);
-        sqz_init(&compress, true);
+        sqz_init(&compress);
         compress.rc.write = put_byte;
         // window_bits: 11 (2KB)
         sqz_compress(&compress, text, input_size, 1u << 11);
@@ -45,7 +45,7 @@ static errno_t lorem_ipsum(void) {
         static char decompressed_data[1024];
         static struct sqz decompress;
         assert(sizeof(decompressed_data) > input_size);
-        sqz_init(&decompress, false);
+        sqz_init(&decompress);
         decompress.rc.read = get_byte;
         uint64_t decompressed = sqz_decompress(&decompress, decompressed_data,
                                                input_size);

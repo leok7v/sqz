@@ -57,11 +57,13 @@ struct sqz {
     struct prob_model  pm_len;      // size: 0..255
     struct prob_model  pm_lsb;      // 0..255 distance least significant byte
     struct prob_model  pm_msb;      // 0..255 distance most  significant byte
+    struct prob_model  pm_dist[3];  // len:2,3,4 distance probability models
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
     size_t prev[sqz_max_window];    // previous `i` of 4 bytes entry
-    struct map map3;
     struct map map4;
+    struct map map3;
+    size_t     map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes
     // entries for the maps (75% occupancy):
     void* map3e[sqz_max_window + sqz_max_window / 2];
     void* map4e[sqz_max_window + sqz_max_window / 2];
@@ -74,7 +76,7 @@ static_assert(offsetof(struct sqz, rc) == 0);
 extern "C" {
 #endif
 
-void     sqz_init(struct sqz* s, bool compress);
+void     sqz_init(struct sqz* s);
 void     sqz_compress(struct sqz* s, const void* d, size_t b, uint32_t window);
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes);
 
