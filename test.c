@@ -45,10 +45,10 @@ static double entropy(uint64_t* freq, size_t n) { // Shannon entropy
     return e;
 }
 
-static uint64_t pm_n(struct prob_model* pm) {
+static size_t pm_n(struct prob_model* pm) {
     uint64_t n = 0;
     for (size_t i = 0; i < countof(pm->freq); i++) { n += pm->freq[i] > 1; }
-    return n;
+    return (size_t)n;
 }
 
 static uint64_t pm_sum(struct prob_model* pm) {
@@ -59,12 +59,12 @@ static uint64_t pm_sum(struct prob_model* pm) {
     return sum;
 }
 
-static double pm_match_percentage(uint64_t sum, size_t total) {
+static double pm_match_percentage(uint64_t sum, uint64_t total) {
     return 100.0 * (double)sum / (double)total;
 }
 
 static double pm_stream_percentage(uint64_t sum, double ent,
-                                   size_t compressed) {
+                                   uint64_t compressed) {
     return 100.0 * sum * ent / (8.0 * (double)compressed);
 }
 
@@ -79,12 +79,12 @@ static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
     #pragma push_macro("print_field_entropy")
     #pragma push_macro("print_entropy")
     #define print_field_entropy(name, field) do {                   \
-        uint64_t num = pm_n(&s->field);                             \
-        double   ent = pm_entropy(&s->field);                       \
+        size_t num = pm_n(&s->field);                               \
+        double ent = pm_entropy(&s->field);                         \
         uint64_t sum = pm_sum(&s->field);                           \
-        double mp =  pm_match_percentage(sum, total);               \
-        double sp =  pm_stream_percentage(sum, ent, compressed);    \
-        printf("%-7s[%3d]: %.2f bits %6.2f%% %6.2f%% %10.10s\n",    \
+        double mp = pm_match_percentage(sum, total);                \
+        double sp = pm_stream_percentage(sum, ent, compressed);     \
+        printf("%-7s[%3zd]: %.2f bits %6.2f%% %6.2f%% %10.10s\n",   \
                name, num, ent, mp, sp, thousands(sum));             \
     } while (0)
     #define print_entropy(field) print_field_entropy(#field, field)
@@ -225,9 +225,11 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
         }
     }
     if (decoder.rc.error == 0) {
+        assert(out.data); // to avoid warning
         swear(bytes == size);
         uint64_t t = nanoseconds();
         uint64_t decompressed = sqz_decompress(&decoder, out.data, (size_t)bytes);
+printf("decompressed: %lld bytes: %lld\n", decompressed, bytes);
         t = nanoseconds() - t;
         if (decoder.rc.error == 0) {
             const bool same = size == bytes &&
@@ -242,6 +244,8 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
                 decoder.rc.error = ENODATA; // or EIO
             }
             swear(same); // to trigger breakpoint while debugging
+        } else {
+            swear(decoder.rc.error == 0);
         }
         swear(decompressed == bytes);
         swear(decoder.rc.error == 0);
@@ -295,8 +299,10 @@ static errno_t locate_test_folder(void) {
 
 int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
-    printf("Window: 2^%d %d sizeof(size_t): %d sizeof(int): %d\n",
-            window_bits, 1u << window_bits, sizeof(size_t), sizeof(int));
+    printf("Window: 2^%d %d sizeof(size_t): %d sizeof(int): %d sizeof(long): "
+           "%d sizeof(long long): %d\n",
+            window_bits, 1u << window_bits, sizeof(size_t), sizeof(int),
+            sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
 #if 0
     if (r == 0) {
@@ -355,8 +361,8 @@ int main(int argc, const char* argv[]) {
         r = test_file(corpus[i]);
     }
 #else
-    r = test_file("test/silesia.tar");
-//  r = test_file("test/bible.txt");
+//  r = test_file("test/silesia.tar");
+    r = test_file("test/bible.txt");
 #endif
     return r;
 }

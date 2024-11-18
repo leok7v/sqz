@@ -121,6 +121,19 @@ static_assert(sizeof(int) >= 4, "32 bits minimum"); // 16 bit int unsupported
 
 enum { sqz_min_len =   2 };
 enum { sqz_max_len = 254 };
+enum { sqz_max_len2_dist = 0x7  };
+enum { sqz_max_len3_dist = 0x7F };
+enum { sqz_max_len4_dist = 0xFF };
+
+// must be power of 2 - 1:
+static_assert(((sqz_max_len2_dist + 1) & sqz_max_len2_dist) == 0, "");
+static_assert(((sqz_max_len3_dist + 1) & sqz_max_len3_dist) == 0, "");
+static_assert(((sqz_max_len4_dist + 1) & sqz_max_len4_dist) == 0, "");
+
+// must fit into 8 bits:
+static_assert(sqz_max_len2_dist <= 0xFF, "");
+static_assert(sqz_max_len3_dist <= 0xFF, "");
+static_assert(sqz_max_len4_dist <= 0xFF, "");
 
 static void map_init(struct map* m, void** p, size_t n, size_t b) {
     assert(16 < n && n <= (1u << 24) && 3 <= b && b <= 4);
@@ -377,9 +390,9 @@ void sqz_init(struct sqz* s) {
     pm_init(&s->pm_len,  256);
     pm_init(&s->pm_lsb,  256);
     pm_init(&s->pm_msb,  256);
-    for (size_t i = 0; i < _countof(s->pm_dist); i++) {
-        pm_init(&s->pm_dist[i], 256);
-    }
+    pm_init(&s->pm_dist[0], sqz_max_len2_dist + 1);
+    pm_init(&s->pm_dist[1], sqz_max_len3_dist + 1);
+    pm_init(&s->pm_dist[2], sqz_max_len4_dist + 1);
 }
 
 static void sqz_init_compress(struct sqz* s) {
@@ -521,13 +534,6 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     }                                                                 \
 } while (0)
 
-static int sqz_bits_in_distance(struct sqz* s, size_t len, size_t dist) {
-    const uint64_t total = pm_total_freq(&s->pm_dist[len - 2]);
-    const uint64_t freq  = s->pm_dist[len - 2].freq[dist & 0xFF];
-    assert(freq > 0);
-    return rt_log2(total) - rt_log2(freq) + 1;
-}
-
 void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (n > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
@@ -547,9 +553,6 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     size_t i = 1;
     const size_t n4 = n - 4;
     sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
-    double bits_avg[3] = {0}; // running averages
-    double bits_max[3] = {0};
-    double bits_min[3] = { DBL_MAX, DBL_MAX, DBL_MAX };
     while (i < n4) {
         size_t len = 0;
         size_t dist = 0;
@@ -562,27 +565,14 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
             len = 0;
             sqz_encode_byte(s, incoming);
         } else {
-//          printf("\"%.*s\" \"%.*s\" %zd:%zd\n", (int)len, in + i, (int)len, in + i - dist, len, dist);
             dist--; // [0..UINT16_MAX]
-            if (2 <= len && len <= 4 && dist <= 0xFF) {
-                int bits = sqz_bits_in_distance(s, len, dist);
-                if (bits_min[len - 2] == DBL_MAX) {
-                    bits_avg[len - 2] = bits;
-                    bits_max[len - 2] = bits;
-                    bits_min[len - 2] = bits;
-                } else {
-                    bits_avg[len - 2] = (bits_avg[len - 2] * i + bits) / (i + 1);
-                    bits_max[len - 2] = max(bits, bits_max[len - 2]);
-                    bits_min[len - 2] = min(bits, bits_min[len - 2]);
-                }
-            }
-            assert(dist <= UINT16_MAX);
             rc_encode(&s->rc, &s->pm_bit0, 0);
             rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
             if (len <= 4) {
                 assert(dist <= 0xFF);
                 rc_encode(&s->rc, &s->pm_dist[len - 2], (uint8_t)(dist & 0xFF));
             } else {
+                assert(dist <= UINT16_MAX);
                 rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
                 rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
             }
@@ -597,9 +587,6 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     rc_encode(&s->rc, &s->pm_bit0, 0);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
-    printf("avg 2: %5.2f 3: %5.2f 4: %5.2f\n", bits_avg[0], bits_avg[1], bits_avg[2]);
-    printf("min 2: %5.2f 3: %5.2f 4: %5.2f\n", bits_min[0], bits_min[1], bits_min[2]);
-    printf("max 2: %5.2f 3: %5.2f 4: %5.2f\n", bits_max[0], bits_max[1], bits_max[2]);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
