@@ -530,6 +530,40 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     }                                                                 \
 } while (0)
 
+uint64_t transition_counts[16][2]; // [current_state][symbol_type]
+
+static inline int next_state(int state, int is_literal) {
+    if (is_literal) {
+        if (state < (int)countof(transition_counts) - 1) { return state + 1; }
+    } else {
+        if (state > 0) { return state - 1; }
+    }
+    return state; // capped at 0 or 15
+}
+
+
+static inline int next_state_markov(int state, int is_literal) {
+    transition_counts[state][is_literal]++;
+    const uint64_t count_literal = transition_counts[state][1];
+    const uint64_t count_match   = transition_counts[state][0];
+    const size_t threshold = max(1, countof(transition_counts) / 8);
+    if (count_literal >= count_match + threshold && state < 15) {
+        return state + 1;
+    } else if (count_match > count_literal + threshold && state > 0) {
+        return state - 1;
+    }
+    return state;
+}
+
+// Simple
+// predictions: 554626
+// Markov's
+// predictions: 554527
+// mozzila:    Simple: 9277557 Markov: 7261272 (8)
+// predictions Simple: 9284952 Markov: 7261267 (16)
+// predictions Simple: 9256040 Markov: 5463669 (32)
+
+
 void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (n > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
@@ -537,6 +571,11 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         return;
     }
     sqz_init_compress(s);
+    memset(transition_counts, 0, sizeof(transition_counts));
+    int s_state = countof(transition_counts) / 2; // simple   state
+    int m_state = countof(transition_counts) / 2; // Markov's state
+    uint64_t last_dist[256] = {0};
+    size_t after = 0; // index of first byte after last match
     const uint8_t* in = (const uint8_t*)memory;
     assert(sqz_min_window <= w && w <= sqz_max_window);
     if (n > 0) {
@@ -546,11 +585,11 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     uint32_t incoming = *(uint32_t*)in;
     uint32_t leaving = incoming;
     sqz_insert(s, in, n, w, 0, incoming, leaving);
-    size_t i = 1;
-    uint64_t last_dist[256] = {0};
-    size_t after = 0; // index of first byte after last match
     const size_t n4 = n - 4;
     sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
+    size_t i = 1;
+size_t s_count = 0; // simple prediction count
+size_t m_count = 0; // Markov prediction count
     while (i < n4) {
         size_t len = 0;
         size_t dist = 0;
@@ -564,13 +603,20 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
             if (dist - 1 == ((last >> 32) & 0xFFFF)) { ix = 2; }
             if (dist - 1 == ((last >> 48) & 0xFFFF)) { ix = 3; }
         }
-        bool too_far = len == 2 && ix < 0 && dist > sqz_max_len2_dist;
+        const bool too_far = len == 2 && ix < 0 && dist > sqz_max_len2_dist;
+        const int is_literal = len == 0 || too_far;
+        int s_predicted_bit0 = s_state >= countof(transition_counts) / 2 ? 1 : 0;
+        int m_predicted_bit0 = m_state >= countof(transition_counts) / 2 ? 1 : 0;
         if (len == 0 || too_far) { // encode literal byte
             len = 0;
             uint8_t c = (uint8_t)incoming;
             if (after) { c ^= in[after]; after = 0; } // XOR predictor
+if (s_predicted_bit0 == 1) { s_count++; }
+if (m_predicted_bit0 == 1) { m_count++; }
             sqz_encode_byte(s, c);
         } else {
+if (s_predicted_bit0 == 0) { s_count++; }
+if (m_predicted_bit0 == 0) { m_count++; }
             after = i - dist + len;
             dist--; // [0..UINT16_MAX]
             rc_encode(&s->rc, &s->pm_bit0, 0);
@@ -601,6 +647,8 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
             last_dist[len]  |= (uint16_t)dist;
         }
         sqz_insert_next(s, in, n4, w, i, len, incoming, leaving);
+        s_state = next_state(s_state, is_literal);
+        m_state = next_state_markov(m_state, is_literal);
     }
     while (i < n) {
         uint8_t c = (uint8_t)in[i];
@@ -612,6 +660,7 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     rc_encode(&s->rc, &s->pm_tag, 0b00);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
+    printf("predictions Simple: %zd Markov: %zd\n", s_count, m_count);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {

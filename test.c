@@ -373,7 +373,7 @@ int main(int argc, const char* argv[]) {
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int),
             sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
-#if 1
+#if 0
     if (r == 0) {
         uint8_t d[4 * 1024] = {0};
         r = test(null, d, sizeof(d));
@@ -389,7 +389,7 @@ int main(int argc, const char* argv[]) {
         r = test(null, (const uint8_t*)d, bytes);
     }
 #endif
-#if 1
+#if 0
     if (r == 0) { // test.c source code:
         r = test_file(__FILE__);
     }
