@@ -73,7 +73,9 @@ static double pm_entropy(struct prob_model* pm) {
 }
 
 static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
-    uint64_t total = pm_sum(&s->pm_byte) + pm_sum(&s->pm_len); // number of matches
+    // every match and unmatched byte have bit0 before them
+    // number of encoded sequences and single bytes
+    uint64_t total = pm_sum(&s->pm_bit0);
     printf("of: %s matches %s -> %s\n",
            thousands(total), thousands(bytes), thousands(compressed));
     #pragma push_macro("print_field_entropy")
@@ -153,15 +155,14 @@ static errno_t compress(const char* from, const char* to,
         if (fn != null) { fn++; } else { fn = (char*)from; }
         double pc  = out.written * 100.0 / bytes; // percent
         double bps = out.written * 8.0   / bytes; // bits per symbol
-        printf("time: %.3fs ", dt / 1.0e9);
         if (from != null) {
-            printf("%-11s -> %-11s %6.2f%% of \"%s\" ",
-                  thousands(bytes), thousands(out.written), pc, fn);
+            printf("%-11s -> %-11s %6.2f%% bps: %.1f of \"%s\"\n",
+                  thousands(bytes), thousands(out.written), pc, bps, fn);
         } else {
-            printf("%-11s -> %-11s %6.2f%% ",
-                  thousands(bytes), thousands(out.written), pc);
+            printf("%-11s -> %-11s %6.2f%% bps: %.1f\n",
+                  thousands(bytes), thousands(out.written), pc, bps);
         }
-        printf("bps: %.1f ", bps);
+        printf("compress   time: %6.3fs ", dt / 1.0e9);
         printf("bitrate: %.1f MiB/s\n", bytes / (dt / 1.0e9) / (1024 * 1024));
     }
     return encoder.rc.error;
@@ -227,8 +228,10 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
         swear(bytes == size);
         uint64_t t = nanoseconds();
         uint64_t decompressed = sqz_decompress(&decoder, out.data, (size_t)bytes);
-printf("decompressed: %lld bytes: %lld\n", decompressed, bytes);
         t = nanoseconds() - t;
+        if (decompressed != bytes) {
+            printf("decompressed: %lld bytes: %lld\n", decompressed, bytes);
+        }
         if (decoder.rc.error == 0) {
             const bool same = size == bytes &&
                        memcmp(input, out.data, (size_t)bytes) == 0;
@@ -241,6 +244,8 @@ printf("decompressed: %lld bytes: %lld\n", decompressed, bytes);
                 // ENODATA is not original posix error; it is OpenGroup error
                 decoder.rc.error = ENODATA; // or EIO
             }
+//          printf("%.*s\n", (int)size, input);
+//          printf("%.*s\n", (int)size, out.data);
             swear(same); // to trigger breakpoint while debugging
         } else {
             swear(decoder.rc.error == 0);
@@ -368,7 +373,7 @@ int main(int argc, const char* argv[]) {
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int),
             sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
-#if 0
+#if 1
     if (r == 0) {
         uint8_t d[4 * 1024] = {0};
         r = test(null, d, sizeof(d));
@@ -378,13 +383,13 @@ int main(int argc, const char* argv[]) {
         }
         r = test(null, d, sizeof(d));
     }
-#endif
-#if 0
     if (r == 0) {
         const char* d = "Hello World Hello.World Hello World";
         size_t bytes = strlen((const char*)d);
         r = test(null, (const uint8_t*)d, bytes);
     }
+#endif
+#if 1
     if (r == 0) { // test.c source code:
         r = test_file(__FILE__);
     }
@@ -455,6 +460,11 @@ time: 21.525s bitrate: 9.4 MiB/s
 decompress
 time:  6.206s bitrate: 32.4 MiB/s
 
+with last_dist[len] index and XOR predictor:
+
+211,087,360 -> 69,801,693   33.07% of "silesia.tar"
+compress   time: 21.834s bitrate: 9.2 MiB/s
+decompress time:  5.228s bitrate: 38.5 MiB/s
 
 compare to:
 https://github.com/inikep/lzbench/blob/master/lzbench18_sorted.md

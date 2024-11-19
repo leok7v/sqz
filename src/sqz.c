@@ -449,6 +449,7 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     sqz_insert(s, in, n, w, 0, incoming, leaving);
     size_t i = 1;
     uint64_t last_dist[256] = {0};
+    size_t after = 0; // index of first byte after last match
     const size_t n4 = n - 4;
     sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
     while (i < n4) {
@@ -468,13 +469,10 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         if (len == 0 || too_far) { // encode literal byte
             len = 0;
             uint8_t c = (uint8_t)incoming;
+            if (after) { c ^= in[after]; after = 0; } // XOR predictor
             sqz_encode_byte(s, c);
         } else {
-//          if (i <= 154) {
-//              printf("[%3zd] %3zd:%3zd 0x%016llx ix: %2d \"%.*s\" \"%.*s\"\n", i, len, dist,
-//                      last_dist[len], ix,
-//                      (int)len, in + i, (int)len, in + i - dist);
-//          }
+            after = i - dist + len;
             dist--; // [0..UINT16_MAX]
             rc_encode(&s->rc, &s->pm_bit0, 0);
             if (len <= 4) {
@@ -502,36 +500,38 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
             }
             last_dist[len] <<= 16;
             last_dist[len]  |= (uint16_t)dist;
-//          if (i == 154) { printf("last |= %zd 0x%016llX\n", dist, last_dist[len]); }
         }
         sqz_insert_next(s, in, n4, w, i, len, incoming, leaving);
     }
     while (i < n) {
-        rc_encode(&s->rc, &s->pm_bit0, 1);
-        rc_encode(&s->rc, &s->pm_byte, in[i]);
+        uint8_t c = (uint8_t)in[i];
+        if (after) { c ^= in[after]; after = 0; } // XOR predictor
+        sqz_encode_byte(s, c);
         i++;
     }
-    rc_encode(&s->rc, &s->pm_bit0,  0);
+    rc_encode(&s->rc, &s->pm_bit0,   0);
     rc_encode(&s->rc, &s->pm_tag, 0b00);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
 }
 
-uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
+uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
     s->rc.code = 0;  // read first 8 bytes
     for (size_t i = 0; i < sizeof(s->rc.code); i++) {
         s->rc.code = (s->rc.code << 8) + s->rc.read(&s->rc);
     }
+    size_t after = 0; // index of first byte after last match
     uint64_t last_dist[256] = {0};
     uint8_t* d = (uint8_t*)data;
     size_t i = 0;
     while (s->rc.error == 0) {
-//      if (i == 154) { rt_breakpoint(); }
         const uint8_t bit0 = rc_decode(&s->rc, &s->pm_bit0);
         if (s->rc.error != 0) { break; }
         if (bit0) {
-            if (i < bytes) {
-                d[i++] = rc_decode(&s->rc, &s->pm_byte);
+            if (i < n) {
+                uint8_t c = rc_decode(&s->rc, &s->pm_byte);
+                if (after) { c ^= d[after]; after = 0; } // XOR predictor
+                d[i++] = c;
             } else {
                 s->rc.error = ENOBUFS;
             }
@@ -560,30 +560,25 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes) {
                 }
             }
             assert(sqz_min_len <= len && len <= sqz_max_len);
-//          if (i <= 154) {
-//              printf("[%3zd] %3zd:%3zd 0x%016llx \"%.*s\"\n", i, len, dist, last_dist[len], (int)len, d + i - dist);
-//          }
             last_dist[len] <<= 16;
             last_dist[len]  |= (uint16_t)dist;
             dist++;
+// if (len <= 2) { printf("[%zd] %zd:%zd \"%.*s\"\n", i, len, dist, (int)len, d + i - dist); }
             if (s->rc.error == 0) {
-                const size_t n = i + len;
+                const size_t next_i = i + len;
                 if (i < dist) {
 //                  printf("[%zd] len %u dist %u\n", i, len, dist);
                     s->rc.error = ERANGE;
-                } else if (i >= dist && n <= bytes) {
+                } else if (i >= dist && next_i <= n) {
                     // memcpy() cannot be used on overlapped regions
                     // because it may read more than one byte at a time.
                     uint8_t* p = d - (size_t)dist;
-                    while (i < n) { d[i] = p[i]; i++; }
+                    while (i < next_i) { d[i] = p[i]; i++; }
                 } else {
                     s->rc.error = ENOBUFS;
                 }
+                after = i - dist;
             }
-//          if (i - len <= 154) {
-//              printf("[%zd] %zd:%zd \"%.*s\" \"%.*s\"\n", i - len, len, dist,
-//                      (int)len, d + i - len, (int)len, d + i - dist - len);
-//          }
         }
     }
     return i;
