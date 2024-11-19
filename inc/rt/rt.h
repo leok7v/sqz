@@ -109,19 +109,19 @@ int32_t rt_printf_implementation(const char* file, int32_t line,
 #if defined(_MSC_VER)
     #define rt_swear(b, ...) ((void)                                        \
     ((!!(b)) || rt_printf_implementation(__FILE__, __LINE__, __func__,      \
-                         true, #b " false " __VA_ARGS__) &&                 \
+                         true, #b " false " __VA_OPT__(,) __VA_ARGS__) &&   \
                 rt_breakpoint() && rt_exit(1)))
 #else
     #define rt_swear(b, ...) ((void)                                        \
         ((!!(b)) || rt_printf_implementation(__FILE__, __LINE__, __func__,  \
-                         true, #b " false " __VA_ARGS__) &&                 \
+                         true, #b " false " __VA_OPT__(,) __VA_ARGS__) &&   \
                 rt_breakpoint() && rt_exit(1)))
 #endif
 
 #if defined(DEBUG) || defined(_DEBUG)
-#define rt_assert(b, ...) rt_swear(b __VA_OPT__(, __VA_ARGS__))
+#define rt_assert(...) rt_swear(__VA_ARGS__)
 #else
-#define rt_assert(b, ...) ((void)(0))
+#define rt_assert(...) ((void)(0))
 #endif
 
 #if defined(_MSC_VER)

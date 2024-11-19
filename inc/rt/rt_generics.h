@@ -87,7 +87,7 @@ rt_implement_for_pointer_types(rt_min_)
     long long int*:          f ## _long_long_int_ptr,           \
     float*:                  f ## _float_ptr,                   \
     double*:                 f ## _double_ptr,                  \
-    default:                 _Generic((x) - (y),                \
+    default:                 _Generic((x) + (y),                \
         unsigned char:          f ## _unsigned_char,            \
         unsigned short int:     f ## _unsigned_short_int,       \
         unsigned int:           f ## _unsigned_int,             \
@@ -100,6 +100,9 @@ rt_implement_for_pointer_types(rt_min_)
         long long int:          f ## _long_long_int,            \
         float:                  f ## _float,                    \
         double:                 f ## _double))((x), (y))
+
+
+
 
 #define rt_max(x, y) rt_dispatch_for_scalar_types(rt_max, x, y)
 #define rt_min(x, y) rt_dispatch_for_scalar_types(rt_min, x, y)
