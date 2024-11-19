@@ -391,7 +391,7 @@ int main(int argc, const char* argv[]) {
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int),
             sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
-#if 0
+#if 1
     if (r == 0) { r = test_zeros(); }
     if (r == 0) { r = test_rle(); }
     if (r == 0) { r = test_hello(); }

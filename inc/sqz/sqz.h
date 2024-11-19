@@ -60,7 +60,6 @@ struct sqz {
     struct prob_model  pm_len;  // len: 5..255
     struct prob_model  pm_lsb;  // 0..255 distance least significant byte
     struct prob_model  pm_msb;  // 0..255 distance most  significant byte
-    uint64_t state[256][2];      // context, bit0
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
     size_t prev[sqz_max_window];    // previous `i` of 4 bytes entry
