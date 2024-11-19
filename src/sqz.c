@@ -446,10 +446,10 @@ enum { // context match:
     sqz_rep   = 0b11, // reused distance
 };
 
-#define next_state(s, state, conext, match, literal) do {   \
-    uint64_t* ss = s->state[conext & sqz_context_mask];     \
+#define next_state(s, state, context, match, literal) do {  \
+    uint64_t* ss = s->state[context & sqz_context_mask];    \
     ss[literal]++;                                          \
-    state   = ss[1] > ss[0];                                \
+    state   = ss[1] >= ss[0];                               \
     context = (context << 2) | match;                       \
 } while (0)
 
@@ -501,10 +501,14 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         const uint8_t too_far = len == 2 && rep < 0 && dist > sqz_max_len2_dist;
         const uint8_t literal = len == 0 || too_far;
 //printf("state: %d\n", state);
+if (0) {
+    uint64_t* ss = s->state[context & sqz_context_mask];
+    printf("state: %d next: %d %lld %lld\n", state, ss[1] >= ss[0], ss[1], ss[0]);
+}
         rc_encode(&((s)->rc), &((s)->pm_bit0), literal ^ state);
 assert(state <= 1);
 assert(delta <= 12);
-if (state != 1 && literal == 1) { prediction1++; }
+if (state == 1 && literal == 1) { prediction1++; }
 if (literal == 1) { total1++; }
 if (state == 0 && literal == 0) { prediction0++; }
 if (literal == 0) { total0++; }
@@ -584,7 +588,7 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
     for (size_t i = 0; i < sizeof(s->rc.code); i++) {
         s->rc.code = (s->rc.code << 8) + s->rc.read(&s->rc);
     }
-    uint8_t  state = 1;
+    uint8_t  state   = 1;
     uint8_t  context = 0;
     uint8_t  match   = sqz_lit;
     uint8_t  delta   = 5; // >= 7 use XOR delta predictor

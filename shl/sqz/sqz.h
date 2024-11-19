@@ -60,7 +60,7 @@ struct sqz {
     struct prob_model  pm_len;  // len: 5..255
     struct prob_model  pm_lsb;  // 0..255 distance least significant byte
     struct prob_model  pm_msb;  // 0..255 distance most  significant byte
-    uint64_t state[16][2];      // context, bit0
+    uint64_t state[256][2];      // context, bit0
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
     size_t prev[sqz_max_window];    // previous `i` of 4 bytes entry
@@ -546,10 +546,10 @@ enum { // context match:
     sqz_rep   = 0b11, // reused distance
 };
 
-#define next_state(s, state, conext, match, literal) do {   \
-    uint64_t* ss = s->state[conext & sqz_context_mask];     \
+#define next_state(s, state, context, match, literal) do {  \
+    uint64_t* ss = s->state[context & sqz_context_mask];    \
     ss[literal]++;                                          \
-    state   = ss[1] > ss[0];                                \
+    state   = ss[1] >= ss[0];                               \
     context = (context << 2) | match;                       \
 } while (0)
 
@@ -601,10 +601,14 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         const uint8_t too_far = len == 2 && rep < 0 && dist > sqz_max_len2_dist;
         const uint8_t literal = len == 0 || too_far;
 //printf("state: %d\n", state);
+if (0) {
+    uint64_t* ss = s->state[context & sqz_context_mask];
+    printf("state: %d next: %d %lld %lld\n", state, ss[1] >= ss[0], ss[1], ss[0]);
+}
         rc_encode(&((s)->rc), &((s)->pm_bit0), literal ^ state);
 assert(state <= 1);
 assert(delta <= 12);
-if (state != 1 && literal == 1) { prediction1++; }
+if (state == 1 && literal == 1) { prediction1++; }
 if (literal == 1) { total1++; }
 if (state == 0 && literal == 0) { prediction0++; }
 if (literal == 0) { total0++; }
@@ -684,7 +688,7 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
     for (size_t i = 0; i < sizeof(s->rc.code); i++) {
         s->rc.code = (s->rc.code << 8) + s->rc.read(&s->rc);
     }
-    uint8_t  state = 1;
+    uint8_t  state   = 1;
     uint8_t  context = 0;
     uint8_t  match   = sqz_lit;
     uint8_t  delta   = 5; // >= 7 use XOR delta predictor
