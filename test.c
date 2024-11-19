@@ -94,7 +94,7 @@ static void dump_entropy(struct sqz* s, int64_t bytes, int64_t compressed) {
     print_entropy(pm_byte);
     print_entropy(pm_tag);
     print_entropy(pm_dist);
-    print_entropy(pm_dix);
+    print_entropy(pm_rep);
     print_entropy(pm_len);
     print_entropy(pm_lsb);
     print_entropy(pm_msb);
@@ -262,6 +262,8 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
 
 const char* compressed = "~compressed~.bin";
 
+static uint64_t seed = 1;
+
 static errno_t test(const char* fn, const uint8_t* data, size_t bytes) {
     errno_t r = compress(fn, compressed, data, bytes);
     if (r == 0) {
@@ -283,6 +285,88 @@ static errno_t test_file(const char* fn) {
     return file_exist(fn) ? test_compression(fn) : 0;
 }
 
+static errno_t test_zeros(void) {
+    uint8_t d[4 * 1024] = {0};
+    return test(__func__, d, sizeof(d));
+}
+
+static errno_t test_rle(void) {
+    uint8_t d[4 * 1024] = {0};
+    // lz77 deals with run length encoding when overlapped
+    for (size_t i = 0; i < sizeof(d); i += 4) {
+        memcpy(d + i, "\x00\x01\x02\x03", 4);
+    }
+    return test(__func__, d, sizeof(d));
+}
+
+static errno_t test_short(void) {
+    const char* s = "0123abcAA_AA_AA_BBB_BBB_CCCC_CCCC_DDDDD_DDDDD_3210";
+    const size_t n = strlen(s);
+    return test(__func__, (uint8_t*)s, n);
+}
+
+static errno_t test_hello(void) {
+    const char* d = "Hello World Hello.World Hello World";
+    size_t bytes = strlen((const char*)d);
+    return  test(__func__, (const uint8_t*)d, bytes);
+}
+
+static errno_t test_long(void) {
+    static uint8_t d[128 * 1024];
+    memset(d, 0x20, sizeof(d));
+    for (size_t k = 0; k < sizeof(d); k ++) {
+        uint8_t base = (uint8_t)(rand64(&seed) * 26);
+        uint8_t len  = (uint8_t)(rand64(&seed) * 16);
+        size_t  start = (size_t)(random64(&seed) % (sizeof(d) - len));
+        for (int i = 0; i < len; i++) {
+            d[start + i] = 0x20 + (base + i) % (128 - 32);
+        }
+    }
+    return test(__func__, d, sizeof(d));
+}
+
+static errno_t test_files(void) {
+    static const char* files[] = {
+        "test/bible.txt",
+        "test/hhgttg.txt",
+        "test/confucius.txt",
+        "test/laozi.txt",
+        "test/sqlite3.c",
+        "test/arm64.elf",
+        "test/x64.elf",
+        "test/mandrill.bmp",
+        "test/mandrill.png",
+        "test/silesia.tar"
+    };
+    errno_t r = 0;
+    for (size_t i = 0; i < countof(files) && r == 0; i++) {
+        r = test_file(files[i]);
+    }
+    return r;
+}
+
+static errno_t test_corpus(void) {
+    static const char* corpus[] = {
+        "test/corpus/dickens.txt",
+        "test/corpus/mozilla.tar",
+        "test/corpus/mr.dicom",
+        "test/corpus/nci.txt",
+        "test/corpus/ooffice.dll",
+        "test/corpus/os.db",
+        "test/corpus/reymont.pdf",
+        "test/corpus/samba.tar",
+        "test/corpus/sao.bin",
+        "test/corpus/webster.html",
+        "test/corpus/x-ray.dicom",
+        "test/corpus/xml.tar",
+    };
+    errno_t r = 0;
+    for (size_t i = 0; i < countof(corpus) && r == 0; i++) {
+        r = test_file(corpus[i]);
+    }
+    return r;
+}
+
 static errno_t locate_test_folder(void) {
     // on Unix systems with "make" executable usually resided
     // and is run from root of repository... On Windows with
@@ -300,72 +384,6 @@ static errno_t locate_test_folder(void) {
     }
 }
 
-/////////////////////////////
-static struct {
-    uint8_t data[1024];
-    size_t  written;
-    size_t  bytes;
-} io;
-
-static void put_byte(struct range_coder* rc, uint8_t b) {
-    (void)rc; // `rc` unused. No bounds check:
-    io.data[io.written++] = b;
-}
-
-static uint8_t get_byte(struct range_coder* rc) {
-    (void)rc; // `rc` unused. No bounds check:
-    return io.data[io.bytes++];
-}
-
-static errno_t lorem_ipsum(void) {
-    const char* text = "Lorem ipsum dolor sit amet. "
-                       "Lorem ipsum dolor sit amet. "
-                       "Lorem ipsum dolor sit amet. ";
-    size_t input_size = strlen(text);
-    uint64_t compressed_size = 0;
-    {
-        static struct sqz compress;
-        compress.that = 0;
-        assert(sizeof(io.data) > input_size * 2);
-        sqz_init(&compress);
-        compress.rc.write = put_byte;
-        // window_bits: 11 (2KB)
-        sqz_compress(&compress, text, input_size, 1u << 11);
-        if (compress.rc.error != 0) {
-            printf("Compression error: %d\n", compress.rc.error);
-            return compress.rc.error;
-        }
-        compressed_size = io.written;
-        printf("%d into %d bytes\n", (int)input_size, (int)compressed_size);
-    }
-    {
-        static char decompressed_data[1024];
-        static struct sqz decompress;
-        assert(sizeof(decompressed_data) > input_size);
-        sqz_init(&decompress);
-        decompress.rc.read = get_byte;
-        uint64_t decompressed = sqz_decompress(&decompress, decompressed_data,
-                                               input_size);
-        if (decompress.rc.error != 0) {
-            printf("Decompression error: %d\n", decompress.rc.error);
-            return decompress.rc.error;
-        } else {
-            if (decompressed != strlen(text)) {
-                printf("Decompressed size does not match original size\n");
-                return EINVAL;
-            }
-        }
-        if (memcmp(decompressed_data, text, (size_t)decompressed) != 0) {
-            printf("Decompressed data does not match original data\n");
-            return EINVAL;
-        }
-        printf("Decompression successful.\n");
-    }
-    return 0;
-}
-/////////////////////
-
-
 int main(int argc, const char* argv[]) {
     (void)argc; (void)argv; // unused
     printf("Window: 2^%d %d sizeof(size_t): %d sizeof(int): %d sizeof(long): "
@@ -374,66 +392,28 @@ int main(int argc, const char* argv[]) {
             sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
 #if 0
-    if (r == 0) {
-        uint8_t d[4 * 1024] = {0};
-        r = test(null, d, sizeof(d));
-        // lz77 deals with run length encoding when overlapped
-        for (size_t i = 0; i < sizeof(d); i += 4) {
-            memcpy(d + i, "\x01\x02\x03\x04", 4);
-        }
-        r = test(null, d, sizeof(d));
-    }
-    if (r == 0) {
-        const char* d = "Hello World Hello.World Hello World";
-        size_t bytes = strlen((const char*)d);
-        r = test(null, (const uint8_t*)d, bytes);
-    }
-    if (r == 0) { // test.c source code:
-        r = test_file(__FILE__);
-    }
+    if (r == 0) { r = test_zeros(); }
+    if (r == 0) { r = test_rle(); }
+    if (r == 0) { r = test_hello(); }
+    if (r == 0) { r = test_short(); }
+    if (r == 0) { r = test_long(); }
+    if (r == 0) { r = test_file(__FILE__); } // test.c source code:
     // argv[0] executable filepath (Windows) or possibly name (Unix)
-    if (r == 0) {
-        r = test_file(argv[0]);
-    }
-    static const char* files[] = {
-        "test/bible.txt",
-        "test/hhgttg.txt",
-        "test/confucius.txt",
-        "test/laozi.txt",
-        "test/sqlite3.c",
-        "test/arm64.elf",
-        "test/x64.elf",
-        "test/mandrill.bmp",
-        "test/mandrill.png",
-        "test/silesia.tar"
-    };
-    for (size_t i = 0; i < countof(files) && r == 0; i++) {
-        r = test_file(files[i]);
-    }
-    static const char* corpus[] = {
-        "test/corpus/dickens.txt",
-        "test/corpus/mozilla.tar",
-        "test/corpus/mr.dicom",
-        "test/corpus/nci.txt",
-        "test/corpus/ooffice.dll",
-        "test/corpus/os.db",
-        "test/corpus/reymont.pdf",
-        "test/corpus/samba.tar",
-        "test/corpus/sao.bin",
-        "test/corpus/webster.html",
-        "test/corpus/x-ray.dicom",
-        "test/corpus/xml.tar",
-    };
-    for (size_t i = 0; i < countof(corpus) && r == 0; i++) {
-        r = test_file(corpus[i]);
-    }
+    if (r == 0) { r = test_file(argv[0]); }
+    if (r == 0) { r = test_files(); }
+    if (r == 0) { r = test_corpus(); }
 #else
-//  r = lorem_ipsum();
-    r = test_file("test/silesia.tar");
-//  r = test_file("test/bible.txt");
-//  r = test_file("test/arm64.elf");
-//  r = test_file("test/hhgttg.txt");
-//  r = test_file("test/corpus/mozilla.tar");
+//  if (r == 0) { r = test_zeros(); }
+//  if (r == 0) { r = test_rle(); }
+//  if (r == 0) { r = test_hello(); }
+//  if (r == 0) { r = test_short(); }
+//  if (r == 0) { r = test_long(); }
+//  if (r == 0) { r = test_file(__FILE__); } // test.c source code:
+//  if (r == 0) { r = test_file("test/silesia.tar"); }
+    if (r == 0) { r = test_file("test/bible.txt"); }
+//  if (r == 0) { r = test_file("test/arm64.elf"); }
+//  if (r == 0) { r = test_file("test/hhgttg.txt"); }
+//  if (r == 0) { r = test_file("test/corpus/mozilla.tar"); }
 #endif
     return r;
 }

@@ -52,14 +52,15 @@ struct sqz {
     struct range_coder rc; // must be first field for callbacks
     void*  that;    // convenience for caller i/o override
     void*  padding; // padding for 32-bit compilers with 8 bytes alignment
-    struct prob_model  pm_bit0;     // 0..1
-    struct prob_model  pm_byte;     // single byte
-    struct prob_model  pm_tag;      // 0..7 (len << 1) | dix (for len <= 4)
-    struct prob_model  pm_dist;     // 0..255 len:2 distance probability model
-    struct prob_model  pm_dix;      // 0..3 last distance index
-    struct prob_model  pm_len;      // len: 5..255
-    struct prob_model  pm_lsb;      // 0..255 distance least significant byte
-    struct prob_model  pm_msb;      // 0..255 distance most  significant byte
+    struct prob_model  pm_bit0; // 0..1
+    struct prob_model  pm_byte; // single byte
+    struct prob_model  pm_tag;  // 0..7 (len << 1) or rep (for len <= 4)
+    struct prob_model  pm_dist; // 0..255 len:2 distance probability model
+    struct prob_model  pm_rep;  // 0..3 last repeated distance index
+    struct prob_model  pm_len;  // len: 5..255
+    struct prob_model  pm_lsb;  // 0..255 distance least significant byte
+    struct prob_model  pm_msb;  // 0..255 distance most  significant byte
+    uint64_t state[16][2];      // context, bit0
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
     size_t prev[sqz_max_window];    // previous `i` of 4 bytes entry

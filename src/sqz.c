@@ -286,10 +286,11 @@ void sqz_init(struct sqz* s) {
     pm_init(&s->pm_byte,  256);
     pm_init(&s->pm_tag, 8);
     pm_init(&s->pm_dist,  sqz_max_len2_dist + 1);
-    pm_init(&s->pm_dix,   4);
+    pm_init(&s->pm_rep,   4);
     pm_init(&s->pm_len,   256);
     pm_init(&s->pm_lsb,   256);
     pm_init(&s->pm_msb,   256);
+    memset(s->state, 0, sizeof(s->state));
 }
 
 static void sqz_init_compress(struct sqz* s) {
@@ -426,38 +427,31 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     }                                                                 \
 } while (0)
 
-/*
-LZMA state machine :
-Literal :
-  state < 7 :
-    normal literal
-  state >= 7 :
-    delta literal
-  state [0-3] -> state = 0
-  state [4-9] -> state -= 3 ([1-6])
-  else state -= 6 [10-11] -> ([4-5])
+enum { sqz_contexts = countof(((struct sqz*)0)->state) };
+enum { sqz_context_mask = sqz_contexts - 1 };
 
-Match :
+static_assert((sqz_contexts & (sqz_contexts - 1)) == 0, "power of 2");
 
-  rep0
-   len 1 :
-     state ->   < 7 ? 9 : 11
-   len > 1 :
-     state ->   < 7 ? 8 : 11
+// delta coding: delta >= 7 will code XOR with next byte `after` last match
 
-  rep12
-     state ->   < 7 ? 8 : 11
+static const uint8_t sqz_lit_next[12]   = {0, 0, 0, 0, 1, 2, 3, 4,  5,  6,   4,  5};
+static const uint8_t sqz_match_next[12] = {7, 7, 7, 7, 7, 7, 7, 10, 10, 10, 10, 10};
+static const uint8_t sqz_rep_next[12]   = {8, 8, 8, 8, 8, 8, 8, 11, 11, 11, 11, 11};
+static const uint8_t sqz_short_next[12] = {9, 9, 9, 9, 9, 9, 9, 11, 11, 11, 11, 11};
 
-  normal
-     state ->   < 7 ? 7 : 10
-*/
+enum { // context match:
+    sqz_lit   = 0b00, // len: 0
+    sqz_match = 0b01, // len: 5..max_len
+    sqz_short = 0b10, // len: 2..4
+    sqz_rep   = 0b11, // reused distance
+};
 
-enum { sqz_states = 12, initial_state = 5 };
-
-static const uint8_t sqz_literal_next[sqz_states]    = {0, 0, 0, 0, 1, 2, 3, 4,  5,  6,   4,  5};
-static const uint8_t sqz_match_next[sqz_states]      = {7, 7, 7, 7, 7, 7, 7, 10, 10, 10, 10, 10};
-static const uint8_t sqz_rep_match_next[sqz_states]  = {8, 8, 8, 8, 8, 8, 8, 11, 11, 11, 11, 11};
-static const uint8_t sqz_short_rep_next[sqz_states]  = {9, 9, 9, 9, 9, 9, 9, 11, 11, 11, 11, 11};
+#define next_state(s, state, conext, match, literal) do {   \
+    uint64_t* ss = s->state[conext & sqz_context_mask];     \
+    ss[literal]++;                                          \
+    state   = ss[1] > ss[0];                                \
+    context = (context << 2) | match;                       \
+} while (0)
 
 void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
@@ -466,20 +460,20 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         return;
     }
     sqz_init_compress(s);
-    uint8_t  match_reps = 0; // match repetition count 0|1|2
-    uint8_t  dix_reps   = 0; // short match repetition count 0|1|2
-    uint8_t  state = initial_state;
-    uint8_t  last_byte = 0;
+    uint8_t  state   = 1; // literal
+    uint8_t  context = 0;
+    uint8_t  match   = sqz_lit;
+    uint8_t  delta   = 5; // >= 7 use XOR delta predictor
+    size_t   after   = 0; // index of first byte after last match
     uint64_t last_dist[256] = {0};
-    size_t after = 0; // index of first byte after last match
     const uint8_t* in = (const uint8_t*)memory;
     assert(sqz_min_window <= w && w <= sqz_max_window);
     if (n > 0) {
-        const uint8_t predicted_literal = state < 7; // normal literal
-        rc_encode(&s->rc, &s->pm_bit0, 1 ^ predicted_literal);
+        const uint8_t literal = 1;
+        rc_encode(&s->rc, &s->pm_bit0, literal ^ state);
         rc_encode(&s->rc, &s->pm_byte, in[0]);
-        state = sqz_literal_next[state];
-        last_byte = in[0];
+        next_state(s, state, context, match, literal);
+        delta = sqz_lit_next[delta];
     }
     uint32_t incoming = *(uint32_t*)in;
     uint32_t leaving = incoming;
@@ -487,95 +481,102 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     const size_t n4 = n - 4;
     sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
     size_t i = 1;
-    double predictions = 0;
-    double total = 0;
+    double prediction0 = 0;
+    double prediction1 = 0;
+    double total0 = 0;
+    double total1 = 0;
     while (i < n4) {
         size_t len = 0;
         size_t dist = 0;
         sqz_find(s, in, n, w, i, incoming, &len, &dist);
         assert(dist == 0 || 1 <= dist && dist <= UINT16_MAX + 1);
-        int ix = -1;
+        int rep = -1;
         if (len > 0) {
             const uint64_t last = last_dist[len];
-            if (dist - 1 == ((last >>  0) & 0xFFFF)) { ix = 0; }
-            if (dist - 1 == ((last >> 16) & 0xFFFF)) { ix = 1; }
-            if (dist - 1 == ((last >> 32) & 0xFFFF)) { ix = 2; }
-            if (dist - 1 == ((last >> 48) & 0xFFFF)) { ix = 3; }
+            if (dist - 1 == ((last >>  0) & 0xFFFF)) { rep = 0; }
+            if (dist - 1 == ((last >> 16) & 0xFFFF)) { rep = 1; }
+            if (dist - 1 == ((last >> 32) & 0xFFFF)) { rep = 2; }
+            if (dist - 1 == ((last >> 48) & 0xFFFF)) { rep = 3; }
         }
-        const uint8_t too_far = len == 2 && ix < 0 && dist > sqz_max_len2_dist;
-        const uint8_t is_literal = len == 0 || too_far;
-        const uint8_t predicted_literal = state < 7; // normal literal
-        predictions += predicted_literal == is_literal;
-        total++;
-        rc_encode(&((s)->rc), &((s)->pm_bit0), is_literal ^ predicted_literal);
-        if (is_literal) { // encode literal byte
+        const uint8_t too_far = len == 2 && rep < 0 && dist > sqz_max_len2_dist;
+        const uint8_t literal = len == 0 || too_far;
+//printf("state: %d\n", state);
+        rc_encode(&((s)->rc), &((s)->pm_bit0), literal ^ state);
+assert(state <= 1);
+assert(delta <= 12);
+if (state != 1 && literal == 1) { prediction1++; }
+if (literal == 1) { total1++; }
+if (state == 0 && literal == 0) { prediction0++; }
+if (literal == 0) { total0++; }
+        if (literal) { // encode literal byte
             len = 0;
             uint8_t c = (uint8_t)incoming;
-            const uint8_t delta_literal = state >= 7;
-            if (delta_literal) {
-                assert(after);
-                if (after) { c ^= in[after]; after = 0; } // XOR predictor
-            }
+            if (delta >= 7 && after) { c ^= in[after]; after = 0; }
             rc_encode(&((s)->rc), &((s)->pm_byte), c);
-            match_reps = 0;
-            dix_reps = 0;
-            state = sqz_literal_next[state];
+            match = sqz_lit;
+            delta = sqz_lit_next[delta];
         } else {
             after = i - dist + len;
             dist--; // [0..UINT16_MAX]
             if (len <= 4) {
-                rc_encode(&s->rc, &s->pm_tag, ((uint8_t)(len - 1)) << 1 | (ix >= 0));
-                if (ix >= 0) {
-                    rc_encode(&s->rc, &s->pm_dix, (uint8_t)ix);
-                    if (dix_reps < 2) { dix_reps++; }
+                rc_encode(&s->rc, &s->pm_tag, ((uint8_t)(len - 1)) << 1 | (rep >= 0));
+                if (rep >= 0) {
+                    rc_encode(&s->rc, &s->pm_rep, (uint8_t)rep);
+                    match = sqz_rep;
+                    delta = rep == 0 ? sqz_short_next[delta] : sqz_rep_next[delta];
                 } else if (len == 2) {
                     assert(dist <= UINT8_MAX);
                     rc_encode(&s->rc, &s->pm_dist, (uint8_t)dist);
-                    if (match_reps < 2) { match_reps++; }
+                    match = sqz_short;
+                    delta = sqz_match_next[delta];
                 } else {
                     assert(dist <= UINT16_MAX);
                     rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
                     rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
-                    if (match_reps < 2) { match_reps++; }
+                    match = sqz_short;
+                    delta = sqz_match_next[delta];
                 }
             } else {
-                rc_encode(&s->rc, &s->pm_tag, ix >= 0);
+                rc_encode(&s->rc, &s->pm_tag, rep >= 0);
                 rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
-                if (ix >= 0) {
-                    rc_encode(&s->rc, &s->pm_dix, (uint8_t)ix);
-                    if (dix_reps < 2) { dix_reps++; }
+                if (rep >= 0) {
+                    rc_encode(&s->rc, &s->pm_rep, (uint8_t)rep);
+                    match = sqz_rep;
+                    delta = rep == 0 ? sqz_short_next[delta] : sqz_rep_next[delta];
                 } else {
                     assert(dist <= UINT16_MAX);
                     rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
                     rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
-                    if (match_reps < 2) { match_reps++; }
+                    match = sqz_match;
+                    delta = sqz_match_next[delta];
                 }
             }
-            state = dix_reps   > 1 ? sqz_short_rep_next[state] :
-                    match_reps > 1 ? sqz_rep_match_next[state] :
-                                     sqz_match_next[state];
             last_dist[len] <<= 16;
             last_dist[len]  |= (uint16_t)dist;
         }
         sqz_insert_next(s, in, n4, w, i, len, incoming, leaving);
-        last_byte = in[i - 1] & 0xFF;
+//      printf("[%3zd] match: %d\n", i, match);
+        next_state(s, state, context, match, literal);
     }
     while (i < n) {
-        const uint8_t predicted_literal = state < 7; // normal literal
-        rc_encode(&((s)->rc), &((s)->pm_bit0), 1 ^ predicted_literal);
+        const uint8_t literal = 1;
+        rc_encode(&((s)->rc), &((s)->pm_bit0), literal ^ state);
         uint8_t c = (uint8_t)in[i];
-        if (after) { c ^= in[after]; after = 0; } // XOR predictor
+        if (delta >= 7 && after) { c ^= in[after]; after = 0; }
         rc_encode(&((s)->rc), &((s)->pm_byte), c);
         i++;
-        state = sqz_literal_next[state];
-        last_byte = in[i - 1] & 0xFF;
+        match = sqz_lit;
+//      printf("[%3zd] match: %d\n", i, match);
+        next_state(s, state, context, match, literal);
+        delta = sqz_lit_next[delta];
     }
-    const uint8_t predicted_literal = state < 7; // normal literal
-    rc_encode(&s->rc, &s->pm_bit0, 0 ^ predicted_literal);
+    const uint8_t literal = 0;
+    rc_encode(&((s)->rc), &((s)->pm_bit0), literal ^ state);
     rc_encode(&s->rc, &s->pm_tag, 0b00);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
-    printf("prediction accuracy: %.1f%%\n", 100.0 * predictions / total);
+    printf("prediction accuracy 1: %.1f%% 0: %.1f%%\n",
+            100.0 * prediction1 / total1, 100.0 * prediction0 / total0);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
@@ -583,31 +584,24 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
     for (size_t i = 0; i < sizeof(s->rc.code); i++) {
         s->rc.code = (s->rc.code << 8) + s->rc.read(&s->rc);
     }
-    uint8_t  state = initial_state;
-    uint8_t  match_reps = 0; // match repetition count 0|1|2
-    uint8_t  dix_reps   = 0; // short match repetition count 0|1|2
-    uint8_t  last_byte = 0;
+    uint8_t  state = 1;
+    uint8_t  context = 0;
+    uint8_t  match   = sqz_lit;
+    uint8_t  delta   = 5; // >= 7 use XOR delta predictor
+    size_t   after   = 0; // index of first byte after last match
     uint64_t last_dist[256] = {0};
-    size_t after = 0; // index of first byte after last match
     uint8_t* d = (uint8_t*)data;
     size_t i = 0;
     while (s->rc.error == 0) {
-        const uint8_t predicted_literal = state < 7; // normal literal
-        const uint8_t is_literal = predicted_literal ^
-                                   rc_decode(&s->rc, &s->pm_bit0);
+        const uint8_t literal   = state ^ rc_decode(&s->rc, &s->pm_bit0);
         if (s->rc.error != 0) { break; }
-        if (is_literal) {
+        if (literal) {
             if (i < n) {
                 uint8_t c = rc_decode(&s->rc, &s->pm_byte);
-                const uint8_t delta_literal = state >= 7;
-                if (delta_literal) {
-                    assert(after);
-                    if (after) { c ^= d[after]; after = 0; } // XOR predictor
-                }
+                if (delta >= 7 && after) { c ^= d[after]; after = 0; }
                 d[i++] = c;
-                dix_reps = 0;
-                match_reps = 0;
-                state = sqz_literal_next[state];
+                match = sqz_lit;
+                delta = sqz_lit_next[delta];
             } else {
                 s->rc.error = ENOBUFS;
             }
@@ -617,12 +611,14 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
             uint8_t len = (tag >> 1) + 1;
             if (len == 2) {
                 if (tag & 1) {
-                    uint8_t dix = rc_decode(&s->rc, &s->pm_dix);
-                    dist = (uint32_t)(last_dist[len] >> (16 * dix)) & 0xFFFF;
-                    if (dix_reps < 2) { dix_reps++; }
+                    uint8_t rep = rc_decode(&s->rc, &s->pm_rep);
+                    dist = (uint32_t)(last_dist[len] >> (rep * 16)) & 0xFFFF;
+                    match = sqz_rep;
+                    delta = rep == 0 ? sqz_short_next[delta] : sqz_rep_next[delta];
                 } else {
                     dist = rc_decode(&s->rc, &s->pm_dist);
-                    if (match_reps < 2) { match_reps++; }
+                    match = sqz_short;
+                    delta = sqz_match_next[delta];
                 }
             } else {
                 if (len == 1) {
@@ -630,22 +626,22 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
                     if (len == 0xFF) { break; }
                 }
                 if (tag & 1) {
-                    uint8_t dix = rc_decode(&s->rc, &s->pm_dix);
-                    dist = (uint32_t)(last_dist[len] >> (16 * dix)) & 0xFFFF;
-                    if (dix_reps < 2) { dix_reps++; }
+                    uint8_t rep = rc_decode(&s->rc, &s->pm_rep);
+                    dist = (uint32_t)(last_dist[len] >> (rep * 16)) & 0xFFFF;
+                    match = sqz_rep;
+                    delta = rep == 0 ? sqz_short_next[delta] : sqz_rep_next[delta];
                 } else {
                     dist  = rc_decode(&s->rc, &s->pm_lsb); // See Note 1
                     dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
-                    if (match_reps < 2) { match_reps++; }
+                    match = len <= 4 ? sqz_short : sqz_match;
+                    delta = sqz_match_next[delta];
                 }
             }
-            state = dix_reps   > 1 ? sqz_short_rep_next[state] :
-                    match_reps > 1 ? sqz_rep_match_next[state] :
-                                     sqz_match_next[state];
             assert(sqz_min_len <= len && len <= sqz_max_len);
             last_dist[len] <<= 16;
             last_dist[len]  |= (uint16_t)dist;
             dist++;
+            after = i - dist + len;
             if (s->rc.error == 0) {
                 const size_t next_i = i + len;
                 if (i < dist) {
@@ -658,10 +654,10 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
                 } else {
                     s->rc.error = ENOBUFS;
                 }
-                after = i - dist;
             }
         }
-        last_byte = d[i - 1] & 0xFF;
+//      printf("[%3zd] match: %d\n", i, match);
+        next_state(s, state, context, match, literal);
     }
     return i;
 }
