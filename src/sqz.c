@@ -417,11 +417,6 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     }                                                                       \
 } while (0)
 
-#define sqz_encode_byte(s, incoming) do {                               \
-    rc_encode(&((s)->rc), &((s)->pm_bit0), 1);                          \
-    rc_encode(&((s)->rc), &((s)->pm_byte), (uint8_t)(incoming & 0xFF)); \
-} while (0)
-
 #define sqz_insert_next(s, in, n4, w, i, len, incoming, leaving) do { \
     const size_t next_i = i + ((len) > 0 ? (len) : 1);                \
     while (i < next_i) {                                              \
@@ -431,39 +426,38 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     }                                                                 \
 } while (0)
 
-uint64_t transition_counts[16][2]; // [current_state][symbol_type]
+/*
+LZMA state machine :
+Literal :
+  state < 7 :
+    normal literal
+  state >= 7 :
+    delta literal
+  state [0-3] -> state = 0
+  state [4-9] -> state -= 3 ([1-6])
+  else state -= 6 [10-11] -> ([4-5])
 
-static inline int next_state(int state, int is_literal) {
-    if (is_literal) {
-        if (state < (int)countof(transition_counts) - 1) { return state + 1; }
-    } else {
-        if (state > 0) { return state - 1; }
-    }
-    return state; // capped at 0 or 15
-}
+Match :
 
+  rep0
+   len 1 :
+     state ->   < 7 ? 9 : 11
+   len > 1 :
+     state ->   < 7 ? 8 : 11
 
-static inline int next_state_markov(int state, int is_literal) {
-    transition_counts[state][is_literal]++;
-    const uint64_t count_literal = transition_counts[state][1];
-    const uint64_t count_match   = transition_counts[state][0];
-    const size_t threshold = max(1, countof(transition_counts) / 8);
-    if (count_literal >= count_match + threshold && state < 15) {
-        return state + 1;
-    } else if (count_match > count_literal + threshold && state > 0) {
-        return state - 1;
-    }
-    return state;
-}
+  rep12
+     state ->   < 7 ? 8 : 11
 
-// Simple
-// predictions: 554626
-// Markov's
-// predictions: 554527
-// mozzila:    Simple: 9277557 Markov: 7261272 (8)
-// predictions Simple: 9284952 Markov: 7261267 (16)
-// predictions Simple: 9256040 Markov: 5463669 (32)
+  normal
+     state ->   < 7 ? 7 : 10
+*/
 
+enum { sqz_states = 12, initial_state = 5 };
+
+static const uint8_t sqz_literal_next[sqz_states]    = {0, 0, 0, 0, 1, 2, 3, 4,  5,  6,   4,  5};
+static const uint8_t sqz_match_next[sqz_states]      = {7, 7, 7, 7, 7, 7, 7, 10, 10, 10, 10, 10};
+static const uint8_t sqz_rep_match_next[sqz_states]  = {8, 8, 8, 8, 8, 8, 8, 11, 11, 11, 11, 11};
+static const uint8_t sqz_short_rep_next[sqz_states]  = {9, 9, 9, 9, 9, 9, 9, 11, 11, 11, 11, 11};
 
 void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
@@ -472,16 +466,20 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         return;
     }
     sqz_init_compress(s);
-    memset(transition_counts, 0, sizeof(transition_counts));
-    int s_state = countof(transition_counts) / 2; // simple   state
-    int m_state = countof(transition_counts) / 2; // Markov's state
+    uint8_t  match_reps = 0; // match repetition count 0|1|2
+    uint8_t  dix_reps   = 0; // short match repetition count 0|1|2
+    uint8_t  state = initial_state;
+    uint8_t  last_byte = 0;
     uint64_t last_dist[256] = {0};
     size_t after = 0; // index of first byte after last match
     const uint8_t* in = (const uint8_t*)memory;
     assert(sqz_min_window <= w && w <= sqz_max_window);
     if (n > 0) {
-        rc_encode(&s->rc, &s->pm_bit0, 1);
+        const uint8_t predicted_literal = state < 7; // normal literal
+        rc_encode(&s->rc, &s->pm_bit0, 1 ^ predicted_literal);
         rc_encode(&s->rc, &s->pm_byte, in[0]);
+        state = sqz_literal_next[state];
+        last_byte = in[0];
     }
     uint32_t incoming = *(uint32_t*)in;
     uint32_t leaving = incoming;
@@ -489,8 +487,8 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     const size_t n4 = n - 4;
     sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
     size_t i = 1;
-size_t s_count = 0; // simple prediction count
-size_t m_count = 0; // Markov prediction count
+    double predictions = 0;
+    double total = 0;
     while (i < n4) {
         size_t len = 0;
         size_t dist = 0;
@@ -504,64 +502,80 @@ size_t m_count = 0; // Markov prediction count
             if (dist - 1 == ((last >> 32) & 0xFFFF)) { ix = 2; }
             if (dist - 1 == ((last >> 48) & 0xFFFF)) { ix = 3; }
         }
-        const bool too_far = len == 2 && ix < 0 && dist > sqz_max_len2_dist;
-        const int is_literal = len == 0 || too_far;
-        int s_predicted_bit0 = s_state >= countof(transition_counts) / 2 ? 1 : 0;
-        int m_predicted_bit0 = m_state >= countof(transition_counts) / 2 ? 1 : 0;
-        if (len == 0 || too_far) { // encode literal byte
+        const uint8_t too_far = len == 2 && ix < 0 && dist > sqz_max_len2_dist;
+        const uint8_t is_literal = len == 0 || too_far;
+        const uint8_t predicted_literal = state < 7; // normal literal
+        predictions += predicted_literal == is_literal;
+        total++;
+        rc_encode(&((s)->rc), &((s)->pm_bit0), is_literal ^ predicted_literal);
+        if (is_literal) { // encode literal byte
             len = 0;
             uint8_t c = (uint8_t)incoming;
-            if (after) { c ^= in[after]; after = 0; } // XOR predictor
-if (s_predicted_bit0 == 1) { s_count++; }
-if (m_predicted_bit0 == 1) { m_count++; }
-            sqz_encode_byte(s, c);
+            const uint8_t delta_literal = state >= 7;
+            if (delta_literal) {
+                assert(after);
+                if (after) { c ^= in[after]; after = 0; } // XOR predictor
+            }
+            rc_encode(&((s)->rc), &((s)->pm_byte), c);
+            match_reps = 0;
+            dix_reps = 0;
+            state = sqz_literal_next[state];
         } else {
-if (s_predicted_bit0 == 0) { s_count++; }
-if (m_predicted_bit0 == 0) { m_count++; }
             after = i - dist + len;
             dist--; // [0..UINT16_MAX]
-            rc_encode(&s->rc, &s->pm_bit0, 0);
             if (len <= 4) {
                 rc_encode(&s->rc, &s->pm_tag, ((uint8_t)(len - 1)) << 1 | (ix >= 0));
                 if (ix >= 0) {
                     rc_encode(&s->rc, &s->pm_dix, (uint8_t)ix);
+                    if (dix_reps < 2) { dix_reps++; }
                 } else if (len == 2) {
                     assert(dist <= UINT8_MAX);
                     rc_encode(&s->rc, &s->pm_dist, (uint8_t)dist);
+                    if (match_reps < 2) { match_reps++; }
                 } else {
                     assert(dist <= UINT16_MAX);
                     rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
                     rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
+                    if (match_reps < 2) { match_reps++; }
                 }
             } else {
                 rc_encode(&s->rc, &s->pm_tag, ix >= 0);
                 rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
                 if (ix >= 0) {
                     rc_encode(&s->rc, &s->pm_dix, (uint8_t)ix);
+                    if (dix_reps < 2) { dix_reps++; }
                 } else {
                     assert(dist <= UINT16_MAX);
                     rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
                     rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
+                    if (match_reps < 2) { match_reps++; }
                 }
             }
+            state = dix_reps   > 1 ? sqz_short_rep_next[state] :
+                    match_reps > 1 ? sqz_rep_match_next[state] :
+                                     sqz_match_next[state];
             last_dist[len] <<= 16;
             last_dist[len]  |= (uint16_t)dist;
         }
         sqz_insert_next(s, in, n4, w, i, len, incoming, leaving);
-        s_state = next_state(s_state, is_literal);
-        m_state = next_state_markov(m_state, is_literal);
+        last_byte = in[i - 1] & 0xFF;
     }
     while (i < n) {
+        const uint8_t predicted_literal = state < 7; // normal literal
+        rc_encode(&((s)->rc), &((s)->pm_bit0), 1 ^ predicted_literal);
         uint8_t c = (uint8_t)in[i];
         if (after) { c ^= in[after]; after = 0; } // XOR predictor
-        sqz_encode_byte(s, c);
+        rc_encode(&((s)->rc), &((s)->pm_byte), c);
         i++;
+        state = sqz_literal_next[state];
+        last_byte = in[i - 1] & 0xFF;
     }
-    rc_encode(&s->rc, &s->pm_bit0,   0);
+    const uint8_t predicted_literal = state < 7; // normal literal
+    rc_encode(&s->rc, &s->pm_bit0, 0 ^ predicted_literal);
     rc_encode(&s->rc, &s->pm_tag, 0b00);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
-    printf("predictions Simple: %zd Markov: %zd\n", s_count, m_count);
+    printf("prediction accuracy: %.1f%%\n", 100.0 * predictions / total);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
@@ -569,54 +583,72 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
     for (size_t i = 0; i < sizeof(s->rc.code); i++) {
         s->rc.code = (s->rc.code << 8) + s->rc.read(&s->rc);
     }
-    size_t after = 0; // index of first byte after last match
+    uint8_t  state = initial_state;
+    uint8_t  match_reps = 0; // match repetition count 0|1|2
+    uint8_t  dix_reps   = 0; // short match repetition count 0|1|2
+    uint8_t  last_byte = 0;
     uint64_t last_dist[256] = {0};
+    size_t after = 0; // index of first byte after last match
     uint8_t* d = (uint8_t*)data;
     size_t i = 0;
     while (s->rc.error == 0) {
-        const uint8_t bit0 = rc_decode(&s->rc, &s->pm_bit0);
+        const uint8_t predicted_literal = state < 7; // normal literal
+        const uint8_t is_literal = predicted_literal ^
+                                   rc_decode(&s->rc, &s->pm_bit0);
         if (s->rc.error != 0) { break; }
-        if (bit0) {
+        if (is_literal) {
             if (i < n) {
                 uint8_t c = rc_decode(&s->rc, &s->pm_byte);
-                if (after) { c ^= d[after]; after = 0; } // XOR predictor
+                const uint8_t delta_literal = state >= 7;
+                if (delta_literal) {
+                    assert(after);
+                    if (after) { c ^= d[after]; after = 0; } // XOR predictor
+                }
                 d[i++] = c;
+                dix_reps = 0;
+                match_reps = 0;
+                state = sqz_literal_next[state];
             } else {
                 s->rc.error = ENOBUFS;
             }
         } else {
             uint32_t dist;
-            uint8_t sh = rc_decode(&s->rc, &s->pm_tag);
-            uint8_t len = (sh >> 1) + 1;
+            uint8_t tag = rc_decode(&s->rc, &s->pm_tag);
+            uint8_t len = (tag >> 1) + 1;
             if (len == 2) {
-                if (sh & 1) {
+                if (tag & 1) {
                     uint8_t dix = rc_decode(&s->rc, &s->pm_dix);
                     dist = (uint32_t)(last_dist[len] >> (16 * dix)) & 0xFFFF;
+                    if (dix_reps < 2) { dix_reps++; }
                 } else {
                     dist = rc_decode(&s->rc, &s->pm_dist);
+                    if (match_reps < 2) { match_reps++; }
                 }
             } else {
                 if (len == 1) {
                     len = rc_decode(&s->rc, &s->pm_len);
                     if (len == 0xFF) { break; }
                 }
-                if (sh & 1) {
+                if (tag & 1) {
                     uint8_t dix = rc_decode(&s->rc, &s->pm_dix);
                     dist = (uint32_t)(last_dist[len] >> (16 * dix)) & 0xFFFF;
+                    if (dix_reps < 2) { dix_reps++; }
                 } else {
                     dist  = rc_decode(&s->rc, &s->pm_lsb); // See Note 1
                     dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
+                    if (match_reps < 2) { match_reps++; }
                 }
             }
+            state = dix_reps   > 1 ? sqz_short_rep_next[state] :
+                    match_reps > 1 ? sqz_rep_match_next[state] :
+                                     sqz_match_next[state];
             assert(sqz_min_len <= len && len <= sqz_max_len);
             last_dist[len] <<= 16;
             last_dist[len]  |= (uint16_t)dist;
             dist++;
-// if (len <= 2) { printf("[%zd] %zd:%zd \"%.*s\"\n", i, len, dist, (int)len, d + i - dist); }
             if (s->rc.error == 0) {
                 const size_t next_i = i + len;
                 if (i < dist) {
-//                  printf("[%zd] len %u dist %u\n", i, len, dist);
                     s->rc.error = ERANGE;
                 } else if (i >= dist && next_i <= n) {
                     // memcpy() cannot be used on overlapped regions
@@ -629,6 +661,7 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
                 after = i - dist;
             }
         }
+        last_byte = d[i - 1] & 0xFF;
     }
     return i;
 }

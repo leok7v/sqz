@@ -388,8 +388,6 @@ int main(int argc, const char* argv[]) {
         size_t bytes = strlen((const char*)d);
         r = test(null, (const uint8_t*)d, bytes);
     }
-#endif
-#if 0
     if (r == 0) { // test.c source code:
         r = test_file(__FILE__);
     }
@@ -429,8 +427,8 @@ int main(int argc, const char* argv[]) {
     for (size_t i = 0; i < countof(corpus) && r == 0; i++) {
         r = test_file(corpus[i]);
     }
-    r = lorem_ipsum();
 #else
+//  r = lorem_ipsum();
     r = test_file("test/silesia.tar");
 //  r = test_file("test/bible.txt");
 //  r = test_file("test/arm64.elf");
@@ -442,7 +440,6 @@ int main(int argc, const char* argv[]) {
 
 #define rt_implementation
 #include "rt/rt.h"
-
 
 /*
 
@@ -465,6 +462,12 @@ with last_dist[len] index and XOR predictor:
 211,087,360 -> 69,801,693   33.07% of "silesia.tar"
 compress   time: 21.834s bitrate: 9.2 MiB/s
 decompress time:  5.228s bitrate: 38.5 MiB/s
+
+with last_dist[len] index, XOR predictor and state predictor:
+
+211,087,360 -> 68,810,435   32.60% bps: 2.6 of "silesia.tar"
+compress   time: 22.325s bitrate: 9.0 MiB/s
+decompress time:  5.553s bitrate: 36.3 MiB/s
 
 compare to:
 https://github.com/inikep/lzbench/blob/master/lzbench18_sorted.md
