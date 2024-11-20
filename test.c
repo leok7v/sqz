@@ -119,7 +119,7 @@ static void put(struct range_coder* rc, uint8_t b) {
 }
 
 static errno_t compress(const char* from, const char* to,
-                        const uint8_t* data, size_t bytes) {
+                        const uint8_t* data, size_t bytes, bool quiet) {
     uint64_t dt = 0; // elapsed time in nanoseconds;
     struct io out = {0}; // compressed file
     io_create(&out, to);
@@ -148,7 +148,7 @@ static errno_t compress(const char* from, const char* to,
         printf("io_close(\"%s\") failed: %s\n", to, strerror(out.error));
         encoder.rc.error = out.error;
     }
-    if (encoder.rc.error == 0) {
+    if (encoder.rc.error == 0 && !quiet) {
         dump_entropy(&encoder, bytes, out.written);
         char* fn = from == null ? null : strrchr(from, '\\'); // basename
         if (fn == null) { fn = from == null ? null : strrchr(from, '/'); }
@@ -188,7 +188,8 @@ static uint8_t get(struct range_coder* rc) {
     return b;
 }
 
-static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
+static errno_t verify(const char* fn, const uint8_t* input, size_t size,
+                      bool quiet) {
     // decompress and compare
     struct io in = {0}; // compressed file
     io_open(&in, fn);
@@ -252,8 +253,10 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size) {
         }
         swear(decompressed == bytes);
         swear(decoder.rc.error == 0);
-        printf("decompress time: %6.3fs bitrate: %.1f MiB/s\n",
-               t / 1.0e9, size / (t / 1.0e9) / (1024 * 1024));
+        if (!quiet) {
+            printf("decompress time: %6.3fs bitrate: %.1f MiB/s\n",
+                   t / 1.0e9, size / (t / 1.0e9) / (1024 * 1024));
+        }
     }
     io_close(&out);
     io_close(&in);
@@ -265,9 +268,10 @@ const char* compressed = "~compressed~.bin";
 static uint64_t seed = 1;
 
 static errno_t test(const char* fn, const uint8_t* data, size_t bytes) {
-    errno_t r = compress(fn, compressed, data, bytes);
+    bool quiet = strstr(fn, "test_0_to_10");
+    errno_t r = compress(fn, compressed, data, bytes, quiet);
     if (r == 0) {
-        r = verify(compressed, data, bytes);
+        r = verify(compressed, data, bytes, quiet);
     }
     (void)remove(compressed);
     return r;
@@ -283,6 +287,18 @@ static errno_t test_compression(const char* fn) {
 
 static errno_t test_file(const char* fn) {
     return file_exist(fn) ? test_compression(fn) : 0;
+}
+
+static errno_t test_0_to_10(void) {
+    const char* s = "0123456789";
+    const size_t n = strlen(s);
+    errno_t r = 0;
+    for (size_t i = 0; i < n && r == 0; i++) {
+        char name[64];
+        snprintf(name, sizeof(name), "%s[%d]", __func__, (int)i);
+        r = test(name, (uint8_t*)s, i);
+    }
+    return r;
 }
 
 static errno_t test_zeros(void) {
@@ -391,7 +407,8 @@ int main(int argc, const char* argv[]) {
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int),
             sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
-#if 1
+#if 0
+    if (r == 0) { r = test_0_to_10(); }
     if (r == 0) { r = test_zeros(); }
     if (r == 0) { r = test_rle(); }
     if (r == 0) { r = test_hello(); }
@@ -403,6 +420,7 @@ int main(int argc, const char* argv[]) {
     if (r == 0) { r = test_files(); }
     if (r == 0) { r = test_corpus(); }
 #else
+//  if (r == 0) { r = test_0_to_10(); }
 //  if (r == 0) { r = test_zeros(); }
 //  if (r == 0) { r = test_rle(); }
 //  if (r == 0) { r = test_hello(); }
@@ -410,8 +428,8 @@ int main(int argc, const char* argv[]) {
 //  if (r == 0) { r = test_long(); }
 //  if (r == 0) { r = test_file(__FILE__); } // test.c source code:
 //  if (r == 0) { r = test_file("test/silesia.tar"); }
-//  if (r == 0) { r = test_file("test/bible.txt"); }
-    if (r == 0) { r = test_file("test/arm64.elf"); }
+    if (r == 0) { r = test_file("test/bible.txt"); }
+//  if (r == 0) { r = test_file("test/arm64.elf"); }
 //  if (r == 0) { r = test_file("test/hhgttg.txt"); }
 //  if (r == 0) { r = test_file("test/corpus/mozilla.tar"); }
 #endif
@@ -423,43 +441,11 @@ int main(int argc, const char* argv[]) {
 
 /*
 
-211,087,360 -> 72,000,153   34.11% of "silesia.tar"
-compress
-time: 20.172s bitrate: 10.0 MiB/s
-decompress
-time:  4.858s bitrate: 41.4 MiB/s
-
-with last_dist[len] index:
-
-211,087,360 -> 69,864,573   33.10% of "silesia.tar"
-compress
-time: 21.525s bitrate: 9.4 MiB/s
-decompress
-time:  6.206s bitrate: 32.4 MiB/s
-
-with last_dist[len] index and XOR predictor:
-
 211,087,360 -> 69,801,693   33.07% of "silesia.tar"
 compress   time: 21.834s bitrate: 9.2 MiB/s
 decompress time:  5.228s bitrate: 38.5 MiB/s
 
-with last_dist[len] index, XOR predictor and state predictor:
-
-211,087,360 -> 68,810,435   32.60% bps: 2.6 of "silesia.tar"
-compress   time: 22.325s bitrate: 9.0 MiB/s
-decompress time:  5.553s bitrate: 36.3 MiB/s
-
 compare to:
 https://github.com/inikep/lzbench/blob/master/lzbench18_sorted.md
-
-dump_entropy of: 49,355,075 matches 211,087,360 -> 72,000,153
-dump_entropy pm_bit0[  2]: 0.89 bits 100.00%   7.64% 49,355,075
-dump_entropy pm_byte[256]: 7.63 bits  69.12%  45.17% 34,112,827
-dump_entropy pm_len [254]: 4.21 bits  30.88%  11.14% 15,242,248
-dump_entropy pm_lsb [256]: 7.76 bits  27.07%  17.99% 13,359,925
-dump_entropy pm_msb [256]: 6.92 bits  27.07%  16.05% 13,359,925
-dump_entropy pm_dist[0][  7]: 2.62 bits   0.23%   0.05%    111,973
-dump_entropy pm_dist[1][127]: 5.80 bits   2.62%   1.30%  1,292,475
-dump_entropy pm_dist[2][255]: 7.34 bits   0.97%   0.61%    477,874
 
 */
