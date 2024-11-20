@@ -31,6 +31,8 @@ struct prob_model  { // probability model
     uint64_t tree[256]; // Fenwick Tree (aka BITS)
 };
 
+// TODO: move error read/write up to struct sqz? (maybe yes maybe no)
+
 struct range_coder {
     uint64_t low;
     uint64_t range;
@@ -62,7 +64,10 @@ struct sqz {
     struct prob_model  pm_msb;  // 0..255 distance most  significant byte
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
-    size_t prev[sqz_max_window];    // previous `i` of 4 bytes entry
+    size_t prev[sqz_max_window]; // previous `i` of 4 bytes entry
+    size_t pos[sqz_max_window];  // offset from i % w of current tree node
+    size_t left[sqz_max_window];
+    size_t right[sqz_max_window];
     struct map map4;
     struct map map3;
     size_t     map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes

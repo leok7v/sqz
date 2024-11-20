@@ -294,10 +294,70 @@ void sqz_init(struct sqz* s) {
 
 static void sqz_init_compress(struct sqz* s) {
     memset(s->prev, 0, sizeof(s->prev));
+    memset(s->pos,  0, sizeof(s->pos));
+    memset(s->left, 0, sizeof(s->left));
+    memset(s->right, 0, sizeof(s->right));
     memset(s->map2, 0, sizeof(s->map2));
     map_init(&s->map3, s->map3e, sizeof(s->map3e) / sizeof(s->map3e[0]), 3);
     map_init(&s->map4, s->map4e, sizeof(s->map4e) / sizeof(s->map4e[0]), 4);
 }
+
+static inline void sqz_tree_insert(struct sqz* s, size_t root, size_t i,
+                                   const uint8_t* in, size_t w) {
+    s->left[i % w] = 0;
+    s->right[i % w] = 0;
+    size_t c = root; // current
+    size_t index = c % w;
+    for (;;) {
+        if (i - c > w) { break; }
+        uint8_t bi = in[i + 4]; // byte at position `i` + 4
+        uint8_t bc = in[c + 4]; // byte at position `c` + 4
+        if (bi < bc) {
+            if (s->left[index] == 0) {
+                s->left[index] = i;
+                break;
+            } else {
+                c = s->left[index];
+            }
+        } else {
+            if (s->right[index] == 0) {
+                s->right[index] = i;
+                break;
+            } else {
+                c = s->right[index];
+            }
+        }
+        index = c % w;
+    }
+}
+
+static inline void sqz_tree_find(struct sqz* s, size_t root, size_t i, const uint8_t* in,
+                                 size_t w, size_t max_k, size_t *len, size_t *dist) {
+    size_t c = root; // current
+    while (c != 0) {
+        if (i - c > w) { break; } // Position is outside of window
+        size_t k = 4;
+        if (*len == 0 || (k == *len && memcmp(in + c + 4, in + i + 4, *len - 4) == 0)) {
+            while (k < max_k && in[c + k] == in[i + k]) { k++; }
+            if (k > *len) {
+                *len = k;
+                *dist = i - c;
+                if (*len == sqz_max_len) { break; } // maximum possible match
+            }
+        }
+        const uint8_t bi = in[i + 4]; // byte at position `i` + 4
+        const uint8_t bc = in[c + 4]; // byte at position `c` + 4
+        const size_t index = c % w;
+        if (bi < bc) {
+            c = s->left[index];
+        } else {
+            c = s->right[index];
+        }
+    }
+}
+
+#define TREE
+#undef  TREE
 
 static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
                        const size_t w, const size_t i, uint32_t incoming,
@@ -321,20 +381,17 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
         const uint32_t b4 = incoming;
         b = map_put3(&s->map3, in + i, b4 & 0x00FFFFFFu);
         assert(b);
-        size_t pp = 0; // previous position of 4 bytes entry
+        const size_t index = i % w;
         size_t ix;
         bool seen = map_get4(&s->map4, b4, &ix);
         if (!seen) {
             b = map_put4(&s->map4, in + i, b4);
             assert(b);
-        } else {
-            pp = (const uint8_t*)s->map4.p[ix] - in;
-            s->map4.p[ix] = in + i;
-        }
-        const size_t index = i % w;
-        if (!seen) {
             s->prev[index] = 0;
         } else {
+            // previous position of 4 bytes entry
+            size_t pp = (const uint8_t*)s->map4.p[ix] - in;
+            s->map4.p[ix] = in + i;
             // `i`, `pp` and `w` are unsigned,
             // if `i` may is less than `w` pp <= i - w is incorrect
             if (i <= w || i - w <= pp && pp < i) {
@@ -350,6 +407,9 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
 // lz_find() function finds longest match at a shortest distance and returns
 // ml: [2..max_len] inclusive
 // md: [1..window] inclusive
+
+static uint64_t prev_sum;
+static uint64_t prev_count;
 
 static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
                             const size_t w, const size_t i,
@@ -372,6 +432,8 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
         if (i - p <= w) { len = k; dst = i - p; }
         size_t index = p & (w - 1); // same as p % w for w = 2^x
         size_t d = s->prev[index];
+        // simple average iterations of the following while loop
+        // on "silesia.tar" is ~154 upto ~430 on test_long (random)
         size_t prev_chain = 0;
         // 0 < d && d <= p && p - d < i && i <= p - d + w
         // 0 < d && i + d <= p + w
@@ -385,6 +447,10 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
             index = p & (w - 1); // same as p % w for w = 2^x
             d = s->prev[index];
             prev_chain++;
+        }
+        if (prev_chain > 0) {
+            prev_sum += prev_chain;
+            prev_count++;
         }
     }
     if (len == 0) {
@@ -439,6 +505,8 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         s->rc.error = E2BIG;
         return;
     }
+prev_sum = 0;
+prev_count = 0;
     sqz_init_compress(s);
     uint8_t  delta   = 5; // >= 7 use XOR delta predictor
     size_t   after   = 0; // index of first byte after last match
@@ -454,7 +522,7 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     uint32_t incoming = *(uint32_t*)in;
     uint32_t leaving = incoming;
     sqz_insert(s, in, n, w, 0, incoming, leaving);
-    const size_t n4 = n - 4;
+    const size_t n4 = n >= 4 ? n - 4 : 0;
     sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
     size_t i = 1;
     while (i < n4) {
@@ -529,6 +597,9 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     rc_encode(&s->rc, &s->pm_tag, 0b00);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
+    if (prev_count > 0) {
+        printf("prev[] simple avg: %.1f\n", (double)prev_sum / prev_count);
+    }
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
