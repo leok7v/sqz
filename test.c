@@ -389,21 +389,27 @@ static errno_t test_permutations(void) {
         }
         d[countof(d) - 1] = 0;
         size_t n = strlen((const char*)d);
+        sqz_debug = j == 33;
         r = compress_and_verify(__func__, d, n, 32, !sqz_debug);
     }
     return r;
 }
 
 static errno_t test_tiny_window(void) {
-    const char* s = "ABCD1.ABCD2,ABCD3;ABCD4:ABCD5`ABCD6#ABCD7%ABCD8_ABCD9-"
+//  const char* s = "ABCD1.ABCD2,ABCD3;ABCD4:ABCD5`ABCD6#ABCD7%ABCD8_ABCD9-"
 //                  "ABCDo.ABCDn,ABCDk;ABCDj:ABCDi`ABCDh#ABCDg%ABCDf_ABCDe-"
-                    "ABCD1.ABCD2,ABCD1;ABCD2:ABCD3`ABCD2#ABCD1%ABCD0_ABCDx-";
+//                  "ABCD1.ABCD2,ABCD1;ABCD2:ABCD3`ABCD2#ABCD1%ABCD0_ABCDx-";
+    const char* s =
+        "ABCD1,0,ABCD1+1+ABCD1+2_ABCD1_1_abcd1_4-ABCD1+5_1234";
+    //   012345678901234567890123456789012345678901234567890123456789
+    //   0         1         2         3         4         5
     size_t n = strlen(s);
     sqz_debug = true;
     print_input(s);
     const uint8_t* d = (const uint8_t*)s;
     errno_t r = 0;
     r = compress_and_verify(__func__, d, n, 32, !sqz_debug);
+    sqz_debug = false;
     return r;
 }
 
@@ -475,7 +481,7 @@ int main(int argc, const char* argv[]) {
     errno_t r = locate_test_folder();
 #if 0
     if (r == 0) { r = test_tiny_window(); }
-    if (r == 0) { r = test_permutations(); }
+//  if (r == 0) { r = test_permutations(); }
     if (r == 0) { r = test_0_to_10(); }
     if (r == 0) { r = test_zeros(); }
     if (r == 0) { r = test_rle(); }
@@ -488,8 +494,8 @@ int main(int argc, const char* argv[]) {
     if (r == 0) { r = test_files(); }
     if (r == 0) { r = test_corpus(); }
 #else
-    if (r == 0) { r = test_tiny_window(); }
-//  if (r == 0) { r = test_permutations(); }
+//  if (r == 0) { r = test_tiny_window(); }
+    if (r == 0) { r = test_permutations(); }
 //  if (r == 0) { r = test_0_to_10(); }
 //  if (r == 0) { r = test_zeros(); }
 //  if (r == 0) { r = test_rle(); }
