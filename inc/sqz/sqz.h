@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 enum {
-    sqz_min_win_bits  =  10,
+    sqz_min_win_bits  =  3,
     sqz_max_win_bits  =  16,
     sqz_min_window    = 1u << sqz_min_win_bits,
     sqz_max_window    = 1u << sqz_max_win_bits
@@ -65,9 +65,10 @@ struct sqz {
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
     size_t prev[sqz_max_window]; // previous `i` of 4 bytes entry
-    size_t pos[sqz_max_window];  // offset from i % w of current tree node
-    size_t left[sqz_max_window];
-    size_t right[sqz_max_window];
+    // tree node:
+    const uint8_t* pos[sqz_max_window];
+    int32_t left[sqz_max_window];
+    int32_t right[sqz_max_window];
     struct map map4;
     struct map map3;
     size_t     map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes
@@ -82,6 +83,8 @@ static_assert(offsetof(struct sqz, rc) == 0);
 #if defined(__cplusplus)
 extern "C" {
 #endif
+
+extern bool sqz_debug;
 
 void     sqz_init(struct sqz* s);
 void     sqz_compress(struct sqz* s, const void* d, size_t b, uint32_t window);

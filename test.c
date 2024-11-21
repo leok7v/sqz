@@ -119,7 +119,8 @@ static void put(struct range_coder* rc, uint8_t b) {
 }
 
 static errno_t compress(const char* from, const char* to,
-                        const uint8_t* data, size_t bytes, bool quiet) {
+                        const uint8_t* data, size_t bytes,
+                        uint32_t window, bool quiet) {
     uint64_t dt = 0; // elapsed time in nanoseconds;
     struct io out = {0}; // compressed file
     io_create(&out, to);
@@ -136,7 +137,7 @@ static errno_t compress(const char* from, const char* to,
         printf("io_create(\"%s\") failed: %s\n", to, strerror(encoder.rc.error));
     } else {
         uint64_t t = nanoseconds();
-        sqz_compress(&encoder, data, bytes, 1u << window_bits);
+        sqz_compress(&encoder, data, bytes, window);
         dt = nanoseconds() - t;
         if (encoder.rc.error != 0) {
             printf("Failed to compress: %s\n", strerror(encoder.rc.error));
@@ -267,9 +268,9 @@ const char* compressed = "~compressed~.bin";
 
 static uint64_t seed = 1;
 
-static errno_t test(const char* fn, const uint8_t* data, size_t bytes) {
-    bool quiet = strstr(fn, "test_0_to_10");
-    errno_t r = compress(fn, compressed, data, bytes, quiet);
+static errno_t compress_and_verify(const char* fn, const
+        uint8_t* data, size_t bytes, uint32_t window, bool quiet) {
+    errno_t r = compress(fn, compressed, data, bytes, window, quiet);
     if (r == 0) {
         r = verify(compressed, data, bytes, quiet);
     }
@@ -277,16 +278,23 @@ static errno_t test(const char* fn, const uint8_t* data, size_t bytes) {
     return r;
 }
 
-static errno_t test_compression(const char* fn) {
+static errno_t test(const char* fn, const uint8_t* data, size_t bytes) {
+    bool quiet = strstr(fn, "test_0_to_10");
+    return compress_and_verify(fn, data, bytes, 1 << window_bits, quiet);
+}
+
+static errno_t read_compress_and_verify(const char* fn) {
     uint8_t* data = null;
     size_t bytes = 0;
     errno_t r = file_read_fully(fn, &data, &bytes);
     if (r != 0) { return r; }
-    return test(fn, data, bytes);
+    r = test(fn, data, bytes);
+    free(data);
+    return r;
 }
 
 static errno_t test_file(const char* fn) {
-    return file_exist(fn) ? test_compression(fn) : 0;
+    return file_exist(fn) ? read_compress_and_verify(fn) : 0;
 }
 
 static errno_t test_0_to_10(void) {
@@ -322,9 +330,9 @@ static errno_t test_short(void) {
 }
 
 static errno_t test_hello(void) {
-    const char* d = "Hello World Hello.World Hello World";
-    size_t bytes = strlen((const char*)d);
-    return  test(__func__, (const uint8_t*)d, bytes);
+    const char* s = "Hello World Hello.World Hello World";
+    size_t n = strlen(s);
+    return  test(__func__, (const uint8_t*)s, n);
 }
 
 static errno_t test_long(void) {
@@ -339,6 +347,64 @@ static errno_t test_long(void) {
         }
     }
     return test(__func__, d, sizeof(d));
+}
+
+static void print_input(const char* s) {
+    size_t n = strlen(s);
+    printf("%s\n", s);
+    for (size_t p = 0; p < n; p++) { printf("%d", p % 10); }
+    printf("\n");
+    for (size_t p = 0; p < n; p++) {
+        if (p % 10 == 9) {
+            printf("%c", p < 99 ? 0x20 : '0' + ((p + 1) / 100) % 10);
+        } else if (p % 10 == 0) {
+            printf("%c", p % 10 != 0 ? 0x20 : '0' + (p / 10) % 10);
+        } else {
+            printf("%c", 0x20);
+        }
+    }
+    printf("\n");
+}
+
+static errno_t test_permutations(void) {
+    uint8_t d[256];
+    errno_t r = 0;
+    for (int j = 0; j < 1024 && r == 0; j++) {
+        memset(d, 0x20, sizeof(d));
+        for (size_t k = 0; k < sizeof(d); k ++) {
+            uint8_t base = (uint8_t)(rand64(&seed) * 26);
+            uint8_t len  = 2 + (uint8_t)(rand64(&seed) * 9);
+            size_t  first = (size_t)(random64(&seed) % (sizeof(d) - len));
+            for (int i = 0; i < len; i++) {
+                d[first + i] = 'A' + (base + i) % 26;
+            }
+            size_t  second = first + len + (int)(random64(&seed) * 3);
+            for (int i = 0; i < len; i++) {
+                d[(second + i) % sizeof(d)] = d[(first + i) % sizeof(d)];
+            }
+            size_t  third = second + len + (int)(random64(&seed) * 3);
+            for (int i = 0; i < len; i++) {
+                d[(third + i) % sizeof(d)] = d[(first + i) % sizeof(d)];
+            }
+        }
+        d[countof(d) - 1] = 0;
+        size_t n = strlen((const char*)d);
+        r = compress_and_verify(__func__, d, n, 32, !sqz_debug);
+    }
+    return r;
+}
+
+static errno_t test_tiny_window(void) {
+    const char* s = "ABCD1.ABCD2,ABCD3;ABCD4:ABCD5`ABCD6#ABCD7%ABCD8_ABCD9-"
+//                  "ABCDo.ABCDn,ABCDk;ABCDj:ABCDi`ABCDh#ABCDg%ABCDf_ABCDe-"
+                    "ABCD1.ABCD2,ABCD1;ABCD2:ABCD3`ABCD2#ABCD1%ABCD0_ABCDx-";
+    size_t n = strlen(s);
+    sqz_debug = true;
+    print_input(s);
+    const uint8_t* d = (const uint8_t*)s;
+    errno_t r = 0;
+    r = compress_and_verify(__func__, d, n, 32, !sqz_debug);
+    return r;
 }
 
 static errno_t test_files(void) {
@@ -408,6 +474,8 @@ int main(int argc, const char* argv[]) {
             sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
 #if 0
+    if (r == 0) { r = test_tiny_window(); }
+    if (r == 0) { r = test_permutations(); }
     if (r == 0) { r = test_0_to_10(); }
     if (r == 0) { r = test_zeros(); }
     if (r == 0) { r = test_rle(); }
@@ -420,6 +488,8 @@ int main(int argc, const char* argv[]) {
     if (r == 0) { r = test_files(); }
     if (r == 0) { r = test_corpus(); }
 #else
+    if (r == 0) { r = test_tiny_window(); }
+//  if (r == 0) { r = test_permutations(); }
 //  if (r == 0) { r = test_0_to_10(); }
 //  if (r == 0) { r = test_zeros(); }
 //  if (r == 0) { r = test_rle(); }
@@ -428,7 +498,7 @@ int main(int argc, const char* argv[]) {
 //  if (r == 0) { r = test_long(); }
 //  if (r == 0) { r = test_file(__FILE__); } // test.c source code:
 //  if (r == 0) { r = test_file("test/silesia.tar"); }
-    if (r == 0) { r = test_file("test/bible.txt"); }
+//  if (r == 0) { r = test_file("test/bible.txt"); }
 //  if (r == 0) { r = test_file("test/arm64.elf"); }
 //  if (r == 0) { r = test_file("test/hhgttg.txt"); }
 //  if (r == 0) { r = test_file("test/corpus/mozilla.tar"); }

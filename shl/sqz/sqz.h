@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 enum {
-    sqz_min_win_bits  =  10,
+    sqz_min_win_bits  =  3,
     sqz_max_win_bits  =  16,
     sqz_min_window    = 1u << sqz_min_win_bits,
     sqz_max_window    = 1u << sqz_max_win_bits
@@ -65,9 +65,10 @@ struct sqz {
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
     size_t prev[sqz_max_window]; // previous `i` of 4 bytes entry
-    size_t pos[sqz_max_window];  // offset from i % w of current tree node
-    size_t left[sqz_max_window];
-    size_t right[sqz_max_window];
+    // tree node:
+    const uint8_t* pos[sqz_max_window];
+    int32_t left[sqz_max_window];
+    int32_t right[sqz_max_window];
     struct map map4;
     struct map map3;
     size_t     map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes
@@ -82,6 +83,8 @@ static_assert(offsetof(struct sqz, rc) == 0);
 #if defined(__cplusplus)
 extern "C" {
 #endif
+
+extern bool sqz_debug;
 
 void     sqz_init(struct sqz* s);
 void     sqz_compress(struct sqz* s, const void* d, size_t b, uint32_t window);
@@ -113,7 +116,6 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes);
 #include <stdlib.h>
 #include <string.h>
 
-
 #ifdef _MSC_VER // overzealous /Wall in cl.exe compiler:
 #pragma warning(disable: 4710) // '...': function not inlined
 #pragma warning(disable: 4711) // function '...' selected for automatic inline expansion
@@ -135,6 +137,10 @@ static_assert(((sqz_max_len2_dist + 1) & sqz_max_len2_dist) == 0, "");
 
 // must fit into 8 bits:
 static_assert(sqz_max_len2_dist <= 0xFF, "");
+
+bool sqz_debug;
+
+#define sqz_trace(...) do { if (sqz_debug) { printf(__VA_ARGS__); } } while (0)
 
 static void map_init(struct map* m, void** p, size_t n, size_t b) {
     assert(16 < n && n <= (1u << 24) && 3 <= b && b <= 4);
@@ -398,7 +404,7 @@ void sqz_init(struct sqz* s) {
 
 static void sqz_init_compress(struct sqz* s) {
     memset(s->prev, 0, sizeof(s->prev));
-    memset(s->pos,  0, sizeof(s->pos));
+    memset(&s->pos[0],  0, sizeof(s->pos));
     memset(s->left, 0, sizeof(s->left));
     memset(s->right, 0, sizeof(s->right));
     memset(s->map2, 0, sizeof(s->map2));
@@ -406,32 +412,88 @@ static void sqz_init_compress(struct sqz* s) {
     map_init(&s->map4, s->map4e, sizeof(s->map4e) / sizeof(s->map4e[0]), 4);
 }
 
-static inline void sqz_tree_insert(struct sqz* s, size_t root, size_t i,
+static inline void sqz_tree_insert(struct sqz* s, size_t p, size_t i,
                                    const uint8_t* in, size_t w) {
-    s->left[i % w] = 0;
-    s->right[i % w] = 0;
-    size_t c = root; // current
-    size_t index = c % w;
-    for (;;) {
-        if (i - c > w) { break; }
-        uint8_t bi = in[i + 4]; // byte at position `i` + 4
-        uint8_t bc = in[c + 4]; // byte at position `c` + 4
-        if (bi < bc) {
-            if (s->left[index] == 0) {
-                s->left[index] = i;
-                break;
-            } else {
-                c = s->left[index];
-            }
-        } else {
-            if (s->right[index] == 0) {
-                s->right[index] = i;
-                break;
-            } else {
-                c = s->right[index];
+    const size_t index = i % w;
+    assert(s->left[index] < 0); // responsibility of the caller
+    assert(s->right[index] < 0);
+    s->pos[index] = in + i;
+    sqz_trace("[%5zu] s->pos[%5zu] := %5zu \"%.5s\"\n", i, index, i, in + i);
+    // if previous root is out of the window all it's children are obsolete too
+    if (i - p > w) { return; }
+    sqz_trace("[%5zu] index: %5zu \"%.5s\"\n", i, index, in + i);
+    const size_t ix = p % w; // index of previous root
+    sqz_trace("[%5zu] p: %5zu ix: %5zu \"%.5s\"\n", i, p, ix, in + p);
+    assert(ix != index); // cannot be the same
+    assert(in[i + 0] == in[p + 0]);
+    assert(in[i + 1] == in[p + 1]);
+    assert(in[i + 2] == in[p + 2]);
+    assert(in[i + 3] == in[p + 3]);
+    if (s->pos[ix] + w < in + i) {
+        return; // previous root and all it's children are outside of the window
+    } else {
+        // trim subtrees:
+        if (s->left[ix] >= 0) {
+            const uint8_t* pos = s->pos[s->left[ix]]; assert(pos);
+            if (pos + w < in + i) {
+                s->left[ix] = -1;
+                sqz_trace("[%5zu] s->left[%5zu] := -1 trim left child\n", i, ix);
             }
         }
-        index = c % w;
+        if (s->right[ix] >= 0) {
+            const uint8_t* pos = s->pos[s->right[ix]]; assert(pos);
+            if (pos + w < in + i) {
+                s->right[ix] = -1;
+                sqz_trace("[%5zu] s->right[%5zu] := -1 trim child\n", i, ix);
+            }
+        }
+        uint8_t bi = in[i + 4]; // byte at position `i` + 4
+        uint8_t bc = in[p + 4]; // byte at position `c` + 4
+        if (bc <= bi) {
+            s->left[index] = (int32_t)ix;
+            sqz_trace("[%5zu] s->left[%5zu] := %5zu \"%.5s\"\n", i, index, ix, in + p);
+            if (s->right[ix] >= 0) {
+                size_t gix = s->right[ix] % w; // right grandchild index
+                const uint8_t* g = s->pos[gix]; assert(g);
+                if (g + w < in + i) {
+                    s->right[ix] = -1; // trim
+                    sqz_trace("[%5zu] s->right[%5zu] := -1 trim grandchild\n", i, ix);
+                } else {
+                    sqz_trace("[%5zu] \"%.5s\" right grandchild\n", i, g);
+                    assert(in[i + 0] == g[0]);
+                    assert(in[i + 1] == g[1]);
+                    assert(in[i + 2] == g[2]);
+                    assert(in[i + 3] == g[3]);
+                    uint8_t br = g[4]; // byte at position `rix` + 4
+                    if (br > bi) { // lift right grandchild up
+                        s->right[index] = (int32_t)gix;
+                        s->right[ix] = -1;
+                    }
+                }
+            }
+        } else {
+            s->right[index] = (int32_t)ix;
+            sqz_trace("[%5zu] s->right[%5zu] := %5zu \"%.5s\"\n", i, index, ix, in + p);
+            if (s->left[ix] >= 0) {
+                size_t gix = s->left[ix] % w; // left grandchild index
+                const uint8_t* g = s->pos[gix]; // grandchild position
+                if (g + w < in + i) {
+                    s->left[ix] = -1; // trim
+                    sqz_trace("[%5zu] s->left[%5zu] := -1 trim grandchild\n", i, ix);
+                } else {
+                    sqz_trace("[%5zu] \"%.5s\" left grandchild\n", i, g);
+                    assert(in[i + 0] == g[0]);
+                    assert(in[i + 1] == g[1]);
+                    assert(in[i + 2] == g[2]);
+                    assert(in[i + 3] == g[3]);
+                    uint8_t bl = g[4]; // byte at position `rix` + 4
+                    if (bl <= bi) { // lift left grandchild up
+                        s->left[index] = (int32_t)gix;
+                        s->left[ix] = -1;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -486,22 +548,38 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
         b = map_put3(&s->map3, in + i, b4 & 0x00FFFFFFu);
         assert(b);
         const size_t index = i % w;
+        s->left[index] = -1;
+        s->right[index] = -1;
         size_t ix;
         bool seen = map_get4(&s->map4, b4, &ix);
         if (!seen) {
             b = map_put4(&s->map4, in + i, b4);
             assert(b);
+            // >debug:
+            assert(map_get4(&s->map4, b4, &ix));
+            assert(s->map4.p[ix] == in + i);
+            // <debug
             s->prev[index] = 0;
+            s->pos[index] = in + i;
+            sqz_trace("[%5zu] s->pos[%5zu] := %5zu \"%.5s\"\n", i, index, i, in + i);
         } else {
-            // previous position of 4 bytes entry
-            size_t pp = (const uint8_t*)s->map4.p[ix] - in;
+            // previous position of 4 bytes entry of 'pm' previous match:
+            const uint8_t* pm = (const uint8_t*)s->map4.p[ix];
+            assert(pm[0] == in[i + 0]);
+            assert(pm[1] == in[i + 1]);
+            assert(pm[2] == in[i + 2]);
+            assert(pm[3] == in[i + 3]);
+            size_t pp = pm - in;
             s->map4.p[ix] = in + i;
             // `i`, `pp` and `w` are unsigned,
             // if `i` may is less than `w` pp <= i - w is incorrect
-            if (i <= w || i - w <= pp && pp < i) {
+//          if (i <= w || i - w <= pp && pp < i) {
+            if (pm + w >= in + i) { // inside window: pm >= in + i - w
                 s->prev[index] = i - pp;
+//              sqz_tree_insert(s, pp, i, in, w);
             } else {
                 s->prev[index] = 0;
+                s->pos[index] = 0;
             }
         }
         s->map2[ b4 & 0xFFFFu] = i + 1;
@@ -514,6 +592,7 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
 
 static uint64_t prev_sum;
 static uint64_t prev_count;
+static size_t prev_max;
 
 static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
                             const size_t w, const size_t i,
@@ -555,6 +634,7 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
         if (prev_chain > 0) {
             prev_sum += prev_chain;
             prev_count++;
+            if (prev_chain > prev_max) { prev_max = prev_chain; }
         }
     }
     if (len == 0) {
@@ -610,6 +690,7 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         return;
     }
 prev_sum = 0;
+prev_max = 0;
 prev_count = 0;
     sqz_init_compress(s);
     uint8_t  delta   = 5; // >= 7 use XOR delta predictor
@@ -702,7 +783,7 @@ prev_count = 0;
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
     if (prev_count > 0) {
-        printf("prev[] simple avg: %.1f\n", (double)prev_sum / prev_count);
+        printf("prev[] simple avg: %.1f max: %zd\n", (double)prev_sum / prev_count, prev_max);
     }
 }
 
