@@ -50,6 +50,12 @@ struct map {
     uint32_t     padding; // shut up annoying compiler warning
 };
 
+struct tree {
+    const uint8_t* p;
+    struct tree* ld; // left descendant
+    struct tree* rd; // right descendant
+};
+
 struct sqz {
     struct range_coder rc; // must be first field for callbacks
     void*  that;    // convenience for caller i/o override
@@ -65,9 +71,7 @@ struct sqz {
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
     size_t prev[sqz_max_window]; // distance to previous `i` of 4 bytes entry
-    size_t node[sqz_max_window]; // distance to previous `i` of 4 bytes entry
-    size_t ld[sqz_max_window];   // left descendant
-    size_t rd[sqz_max_window];   // right descendant
+    struct tree tree[sqz_max_window];
     struct map map4;
     struct map map3;
     size_t     map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes

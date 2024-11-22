@@ -297,155 +297,74 @@ void sqz_init(struct sqz* s) {
 
 static void sqz_init_compress(struct sqz* s) {
     memset(s->prev, 0, sizeof(s->prev));
-    memset(&s->node[0],   0, sizeof(s->node));
-    memset(s->ld,   0xFF, sizeof(s->ld));
-    memset(s->rd,  0xFF, sizeof(s->rd));
+    memset(s->tree, 0, sizeof(s->tree));
     memset(s->map2, 0, sizeof(s->map2));
     map_init(&s->map3, s->map3e, sizeof(s->map3e) / sizeof(s->map3e[0]), 3);
     map_init(&s->map4, s->map4e, sizeof(s->map4e) / sizeof(s->map4e[0]), 4);
 }
 
-#if 0
-static void sqz_move_up_grandchild(struct sqz* s, const uint8_t* in, size_t i,
-                                   size_t w, size_t index, uint8_t bi) {
-    assert((s->ld[index] >= 0) != (s->rd[index] >= 0));
-    if (s->ld[index] >= 0) {
-        assert(s->node[s->ld[index]]);
-        assert(s->rd[index] < 0);
-    }
-    if (s->rd[index] >= 0) {
-        assert(s->node[s->rd[index]]);
-        assert(s->ld[index] < 0);
-    }
-    // the one and only child index:
-    size_t ix = s->ld[index] >= 0 ? s->ld[index] : s->rd[index];
-    if (ix >= 0) {
-        // grandchild child:
-        int32_t gix = s->ld[ix] >= 0 ? s->ld[ix] : s->rd[ix];
-        if (gix >= 0) {
-            const uint8_t* g = s->node[gix]; assert(g);
-            assert(in[i + 0] == g[0]);
-            assert(in[i + 1] == g[1]);
-            assert(in[i + 2] == g[2]);
-            assert(in[i + 3] == g[3]);
-            if (g + w >= in + i) {
-                uint8_t bg = g[4]; // byte at position `gix` + 4
-                if (bi <= bg && s->ld[ix] >= 0) {
-                    printf("move left grandchild up");
-                    s->ld[index] = (int32_t)gix;
-                    s->node[s->ld[ix]] = 0; // TODO: remove, not necessary. Only for debugging
-                    s->ld[ix] = -1;
-                } else if (bg < bi && s->rd[ix] >= 0) {
-                    printf("move right grandchild up");
-                    s->rd[index] = (int32_t)gix;
-                    s->node[s->rd[ix]] = 0; // TODO: remove, not necessary. Only for debugging
-                    s->rd[ix] = -1;
-                }
-            }
-        }
-    }
-}
-
 static inline void sqz_tree_insert(struct sqz* s, const uint8_t* in, size_t i,
-                                   size_t w) {
-    const size_t index = i % w;
-    const uint8_t* pm = s->node[index]; // previous match
-    assert(in <= pm && pm < in + i);
-    assert(pm + w >= in + i);
-    assert(s->ld[index] < 0); // responsibility of the caller
-    assert(s->rd[index] < 0);
-    assert(in[i + 0] == pm[0]);
-    assert(in[i + 1] == pm[1]);
-    assert(in[i + 2] == pm[2]);
-    assert(in[i + 3] == pm[3]);
-    sqz_trace("[%5zu] s->pos[%5zu] := %5zu \"%.5s\"\n", i, index, i, in + i);
-    sqz_trace("[%5zu] index: %5zu \"%.5s\"\n", i, index, in + i);
-    size_t p = pm - in; // index of previous match
-    const size_t ix = p % w; // index of previous root
-    sqz_trace("[%5zu] p: %5zu ix: %5zu \"%.5s\"\n", i, p, ix, in + p);
-    assert(ix != index); // cannot be the same
-    assert(in[i + 0] == in[p + 0]);
-    assert(in[i + 1] == in[p + 1]);
-    assert(in[i + 2] == in[p + 2]);
-    assert(in[i + 3] == in[p + 3]);
-    if (s->node[ix] + w < in + i) {
-        return; // previous root and all it's children are outside of the window
-    } else {
-        // check that left and right children present and their pos[] points inside the window
-        // if not set to -1
-        if (s->ld[ix] >= 0) {
-            const uint8_t* node = s->node[s->ld[ix]]; assert(node);
-            if (node + w < in + i) {
-                s->ld[ix] = -1;
-                s->node[s->ld[ix]] = 0; // TODO: remove, not necessary. Only for debugging
-                sqz_trace("[%5zu] s->left[%5zu] := -1 trim left child\n", i, ix);
-            }
-        }
-        if (s->rd[ix] >= 0) {
-            const uint8_t* node = s->node[s->rd[ix]]; assert(node);
-            if (node + w < in + i) {
-                s->rd[ix] = -1;
-                s->node[s->rd[ix]] = 0; // TODO: remove, not necessary. Only for debugging
-                sqz_trace("[%5zu] s->right[%5zu] := -1 trim child\n", i, ix);
-            }
-        }
-        uint8_t bi = in[i + 4]; // byte at position `i` + 4
-        uint8_t bc = in[p + 4]; // byte at position `c` + 4
-        if (bc <= bi) {
-            s->ld[index] = (int32_t)ix;
-            sqz_trace("[%5zu] s->left[%5zu] := %5zu \"%.5s\"\n", i, index, ix, pm);
-        } else {
-            s->rd[index] = (int32_t)ix;
-            sqz_trace("[%5zu] s->right[%5zu] := %5zu \"%.5s\"\n", i, index, ix, pm);
-        }
-        sqz_move_up_grandchild(s, in, i, w, index, bi);
-    }
-}
-
-static inline void sqz_tree_find(struct sqz* s, size_t root, size_t i, const uint8_t* in,
-                                 size_t w, size_t max_k, size_t *len, size_t *dist) {
-    size_t c = root; // current
-    while (c != 0) {
-        if (i - c > w) { break; } // Position is outside of window
-        size_t k = 4;
-        if (*len == 0 || (k == *len && memcmp(in + c + 4, in + i + 4, *len - 4) == 0)) {
-            while (k < max_k && in[c + k] == in[i + k]) { k++; }
-            if (k > *len) {
-                *len = k;
-                *dist = i - c;
-                if (*len == sqz_max_len) { break; } // maximum possible match
-            }
-        }
-        const uint8_t bi = in[i + 4]; // byte at position `i` + 4
-        const uint8_t bc = in[c + 4]; // byte at position `c` + 4
-        const size_t index = c % w;
-        if (bi < bc) {
-            c = s->ld[index];
-        } else {
-            c = s->rd[index];
-        }
-    }
-}
-#endif
-
-static inline void sqz_tree_insert(struct sqz* s, const uint8_t* in, size_t i,
-                                   size_t w) {
+                                   size_t w, const uint8_t* pp) {
+//sqz_debug = true;
     const size_t index = i & (w - 1);
-    assert(s->ld[index] == 0); // must be set to zero by caller
-    assert(s->rd[index] == 0); // must be set to zero by caller
-    const size_t d = s->node[index]; // distance to previous match
-    const size_t p = i - d;
-    assert(d != 0);
-    assert(p < i); // guaranteed by d > 0
-    assert(p + w >= i); // unsigned of: p >= i - w
-    assert(memcmp(in + p, in + i, 4) == 0);
-    uint8_t bi = in[i + 4]; // byte at position `i` + 4
-    uint8_t bp = in[p + 4]; // byte at position `p` + 4
-    if (bp <= bi) {
-        s->ld[index] = d;
+    assert(s->tree[index].p == in + i); // already assigned by caller
+    assert(!s->tree[index].ld); // must be set to zero by caller
+    assert(!s->tree[index].rd); // must be set to zero by caller
+    assert(memcmp(pp, in + i, 4) == 0);
+    const size_t  p = pp - in;
+    const size_t  pix = p & (w - 1); // previous index
+    assert(pix != index);
+    const uint8_t bi = in[i + 4]; // byte at position `i` + 4
+    const uint8_t bp = in[p + 4]; // byte at position `p` + 4
+    const bool left = bp <= bi;
+    if (left) {
+        s->tree[index].ld = &s->tree[pix];
+        sqz_trace("[%5zu] s->left[%5zu] := %zd \"%.5s\" \"%.5s\"\n",
+                  i, index, p, in + i, s->tree[index].ld->p);
     } else {
-        s->rd[index] = d;
+        s->tree[index].rd = &s->tree[pix];;
+        sqz_trace("[%5zu] s->right[%5zu] := %zd \"%.5s\" \"%.5s\"\n",
+                  i, index, p, in + i, s->tree[index].rd->p);
     }
+    if (left && s->tree[pix].rd) {
+        // unsigned: s->tree[pix].rd->p < in + i - w
+        if (s->tree[pix].rd->p + w < in + i || // out of window
+            memcmp(s->tree[pix].rd->p, in + i, 4) != 0) { // grandchild overwritten
+            s->tree[pix].rd = 0;
+        } else {
+            assert(memcmp(s->tree[pix].rd->p, in + i, 4) == 0);
+            uint8_t bg = s->tree[pix].rd->p[4]; // byte 4 at grandchild
+            if (bg > bi) {
+                assert(!s->tree[index].rd && s->tree[pix].rd);
+                s->tree[index].rd = s->tree[pix].rd;
+                // TODO: do we really need it memset() below? Introduced durring debugging and did not help
+                memset(&s->tree[pix].rd, 0, sizeof(s->tree[pix].rd));
+                s->tree[pix].rd = 0;
+                sqz_trace("right grandchild moved up\n");
+            }
+        }
+    } else if (!left && s->tree[pix].ld) {
+        // unsigned: s->tree[pix].ld->p < in + i - w
+        if (s->tree[pix].ld->p + w < in + i || // out of window
+            memcmp(s->tree[pix].ld->p, in + i, 4) != 0) { // grandchild overwritten
+            s->tree[pix].ld = 0;
+        } else {
+            assert(memcmp(s->tree[pix].ld->p, in + i, 4) == 0);
+            uint8_t bg = s->tree[pix].ld->p[4]; // byte at position `p` + 4
+            if (bg <= bi) {
+                assert(!s->tree[index].ld && s->tree[pix].ld);
+                s->tree[index].ld = s->tree[pix].ld;
+                // TODO: do we really need it memset() below? Introduced durring debugging and did not help
+                memset(&s->tree[pix].ld, 0, sizeof(s->tree[pix].ld));
+                s->tree[pix].ld = 0;
+                sqz_trace("left  grandchild moved up\n");
+            }
+        }
+    }
+    sqz_trace("[%5zu] inserted %zd \"%.5s\" left: %zd right: %zd\n", i,
+        s->tree[index].p - in, s->tree[index].p,
+        s->tree[index].ld && s->tree[index].ld->p ? s->tree[index].ld->p - in : 0,
+        s->tree[index].rd && s->tree[index].rd->p ? s->tree[index].rd->p - in : 0);
 }
 
 static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
@@ -471,22 +390,21 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
         b = map_put3(&s->map3, in + i, b4 & 0x00FFFFFFu);
         assert(b);
         const size_t index = i % w;
-        s->ld[index]  = 0;
-        s->rd[index] = 0;
+        s->tree[index].p = in + i;
+        s->tree[index].ld = 0;
+        s->tree[index].rd = 0;
+        sqz_trace("[%5zu] tree[%5zu].p := %5zu \"%.5s\"\n", i, index, i, in + i);
         size_t ix;
         bool seen = map_get4(&s->map4, b4, &ix);
         if (!seen) {
             b = map_put4(&s->map4, in + i, b4); // TODO: result of this put can be reused in next find() instead if calling map_get4()
             assert(b);
             s->prev[index] = 0;
-            s->node[index] = 0;
-//          sqz_trace("[%5zu] prev[%zd] := 0\n", i, index);
+            sqz_trace("[%5zu] prev[%zd] := 0\n", i, index);
             // >debug:
             assert(map_get4(&s->map4, b4, &ix));
             assert(s->map4.p[ix] == in + i);
             // <debug
-//          s->node[index] = in + i;
-//          sqz_trace("[%5zu] pos[%5zu] := %5zu \"%.5s\"\n", i, index, i, in + i);
         } else {
             // previous position of 4 bytes entry of 'pm' previous match:
             const uint8_t* pm = (const uint8_t*)s->map4.p[ix];
@@ -496,13 +414,12 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
             // `i`, `pp` and `w` are unsigned,
             if (pp + w >= i) { // inside window: pp >= i - w
                 s->prev[index] = i - pp;
-                s->node[index] = i - pp;
+                sqz_trace("[%5zu] prev[%zd] := %zd \"%.5s\"\n", i, index, i - pp, pm);
+                sqz_trace("[%5zu] tree[%5zu].p := %5zu \"%.5s\"\n", i, index, i, pm);
                 assert(memcmp(pm, in + i, 4) == 0);
-//              sqz_trace("[%5zu] prev[%zd] := %zd \"%.5s\"\n", i, index, i - pp, pm);
-                sqz_tree_insert(s, in, i, w);
+                sqz_tree_insert(s, in, i, w, pm);
             } else {
                 s->prev[index] = 0;
-                s->node[index] = 0;
 //              sqz_trace("[%5zu] prev[%zd] := 0\n", i, index);
             }
         }
@@ -516,35 +433,35 @@ static inline void sqz_tree_find(struct sqz* s,
     size_t len = 4;
     size_t dst = i - p;
     const size_t max_k = n - i > sqz_max_len ? sqz_max_len : n - i;
-    for (;;) {
+    size_t pix = p & (w - 1); // previous index
+    struct tree* node = &s->tree[pix];
+    while (node->p) {
         sqz_trace("[%5zd] p: %5zd \"%.*s\" \"%.*s\" len: %zd\n",
                     i, p, (int)len + 1, in + i, (int)len + 1, in + p, len);
-        assert(memcmp(in + p, in + i, len) == 0);
-        if (sqz_debug && p == 82) { rt_breakpoint(); }
+        assert(memcmp(node->p, in + i, len) == 0);
         size_t k = len; // because with `len` bytes are the same
-        while (k < max_k && in[p + k] == in[i + k]) { k++; }
+        while (k < max_k && node->p[k] == in[i + k]) { k++; }
         if (k > len) {
             len = k;
-            dst = i - p;
+            dst = i - (node->p - in);
             sqz_trace("[%5zd] p: %5zd \"%.*s\" \"%.*s\" len: %zu, dst: %zu\n",
                         i, p, (int)len + 1, in + i, (int)len + 1, in + p, len, dst);
             if (len == sqz_max_len) { break; }
         }
-        const uint8_t bi = in[i + 4]; // byte at position `i` + 4
-        const uint8_t bp = in[p + 4]; // byte at position `c` + 4
-        const size_t index = p & (w - 1); // same as p % w for w = 2^x
-        size_t d;
+        const uint8_t bi = in[i + 4];  // byte at position `i` + 4
+        const uint8_t bp = node->p[4]; // byte at position `c` + 4
         if (bi <= bp) {
-            d = s->ld[index];
+            node = s->tree[pix].ld;
         } else {
-            d = s->rd[index];
+            node = s->tree[pix].rd;
         }
-        if (d == 0) { break; }
-        p -= d;
-        // p < i - w won't work because unsigned i - w for i < w
-        if (p + w < i) { break; } // unsigned: same as p < i - w
-        assert(memcmp(in + p, in + i, 4) == 0);
-        if (memcmp(in + p, in + i, len) != 0) { break; }
+        if (!node) { break; }
+        if (node->p) {
+            p = node->p - in;
+            if (p + w < i) { break; } // unsigned of: p < i - w
+            if (memcmp(node->p, in + i, len) != 0) { break; }
+            pix = p & (w - 1);
+        }
     }
     if (len > 0) {
         *ml = len;
@@ -577,6 +494,8 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     size_t td = 0;
     if (b) {
         sqz_trace("found\n");
+//      if (sqz_debug && i == 54) { rt_breakpoint(); }
+
         size_t p = (const uint8_t*)s->map4.p[ix] - in;
         sqz_tree_find(s, in, i, n, w, p, &tl, &td);
         const size_t max_k = n - i > sqz_max_len ? sqz_max_len : n - i;
@@ -603,7 +522,7 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
             if (d == 0) { break; }
             p -= d;
             // p < i - w won't work because unsigned i - w for i < w
-            if (p + w < i) { break; } // same as p < i - w
+            if (p + w < i) { break; } // unsigned version of: p < i - w
             prev_chain++;
             assert(memcmp(in + p, in + i, 4) == 0);
             if (memcmp(in + p, in + i, len) != 0) { break; }
@@ -614,10 +533,14 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
             if (prev_chain > prev_max) { prev_max = prev_chain; }
         }
         if (len >= 4 || tl >= 4) {
-            assert(tl == len);
-            assert(td == dst);
+            // tree search works better because children move up
+            assert(tl >= len);
+            if (tl == len) {
+                assert(td == dst);
+            } else {
+                assert(0 < td && td <= w);
+            }
         }
-
     }
     if (len == 0) {
         b = map_get3(&s->map3, b4 & 0xFFFFFF, &ix);
