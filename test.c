@@ -297,6 +297,23 @@ static errno_t test_file(const char* fn) {
     return file_exist(fn) ? read_compress_and_verify(fn) : 0;
 }
 
+static void dump_string_input(const char* s) {
+    size_t n = strlen(s);
+    printf("%s\n", s);
+    for (size_t p = 0; p < n; p++) { printf("%d", p % 10); }
+    printf("\n");
+    for (size_t p = 0; p < n; p++) {
+        if (p % 10 == 9) {
+            printf("%c", p < 99 ? 0x20 : '0' + ((p + 1) / 100) % 10);
+        } else if (p % 10 == 0) {
+            printf("%c", p % 10 != 0 ? 0x20 : '0' + (p / 10) % 10);
+        } else {
+            printf("%c", 0x20);
+        }
+    }
+    printf("\n");
+}
+
 static errno_t test_0_to_10(void) {
     const char* s = "0123456789";
     const size_t n = strlen(s);
@@ -349,21 +366,58 @@ static errno_t test_long(void) {
     return test(__func__, d, sizeof(d));
 }
 
-static void print_input(const char* s) {
+static errno_t debug_in_window(const char* s, size_t w) {
     size_t n = strlen(s);
-    printf("%s\n", s);
-    for (size_t p = 0; p < n; p++) { printf("%d", p % 10); }
-    printf("\n");
-    for (size_t p = 0; p < n; p++) {
-        if (p % 10 == 9) {
-            printf("%c", p < 99 ? 0x20 : '0' + ((p + 1) / 100) % 10);
-        } else if (p % 10 == 0) {
-            printf("%c", p % 10 != 0 ? 0x20 : '0' + (p / 10) % 10);
-        } else {
-            printf("%c", 0x20);
-        }
-    }
-    printf("\n");
+    sqz_debug = true;
+    dump_string_input(s);
+    const uint8_t* d = (const uint8_t*)s;
+    errno_t r = 0;
+    r = compress_and_verify(__func__, d, n, 32, !sqz_debug);
+    sqz_debug = false;
+    return r;
+}
+
+static errno_t test_case_1(void) { // good!
+//  const char* s = "ABCD1.ABCD2,ABCD3;ABCD4:ABCD5`ABCD6#ABCD7%ABCD8_ABCD9-"
+//                  "ABCDo.ABCDn,ABCDk;ABCDj:ABCDi`ABCDh#ABCDg%ABCDf_ABCDe-"
+//                  "ABCD1.ABCD2,ABCD1;ABCD2:ABCD3`ABCD2#ABCD1%ABCD0_ABCDx-";
+    const char* s =
+        "ABCD1,0,ABCD1+1+ABCD1+2_ABCD1_1_abcd1_4-ABCD1+5_1234";
+    //   012345678901234567890123456789012345678901234567890123456789
+    //   0         1         2         3         4         5
+    return debug_in_window(s, 32);
+}
+
+static errno_t test_case_2(void) { // good
+    const char* s =
+        "ABCD1,0,ABCD1+1+ABCD3+2_ABCD1_1_abcd1_4-ABCD1+5_1234";
+    //   012345678901234567890123456789012345678901234567890123456789
+    //   0         1         2         3         4         5
+    return debug_in_window(s, 32);
+}
+
+static errno_t test_case_3(void) { // good
+    const char* s =
+        "STUVWJKLMNOPQRRYZQRLMNNNNNSRSTUVWTUVWNOPQRNOPQRNOPQVWXBVWXYZDGH";
+    //   012345678901234567890123456789012345678901234567890123456789
+    //   0         1         2         3         4         5
+    return debug_in_window(s, 32);
+}
+
+static errno_t test_case_4(void) {
+    const char* s = // 7 long previous search chain
+        "HIJDEFGGGGGGGGGGGEFGHGGGGGGGGGGGIIJTUVWXYZCDECDECTCDECYZAABCDEF";
+    //   012345678901234567890123456789012345678901234567890123456789
+    //   0         1         2         3         4         5
+    return debug_in_window(s, 32);
+}
+
+static errno_t test_case_5(void) {
+    const char* s =
+        "FGHIJKLMNOTUVWXYZABCKXMXJKLMNOPLMJKLMNWXYTUVJKLMNVWMNOKLMNOPQRD";
+    //   012345678901234567890123456789012345678901234567890123456789
+    //   0         1         2         3         4         5
+    return debug_in_window(s, 32);
 }
 
 static errno_t test_permutations(void) {
@@ -389,45 +443,12 @@ static errno_t test_permutations(void) {
         }
         d[countof(d) - 1] = 0;
         size_t n = strlen((const char*)d);
-//      sqz_debug = j == 259;
+        sqz_debug = j == 589;
+        if (sqz_debug) { dump_string_input((const char*)d); }
         r = compress_and_verify(__func__, d, n, 32, !sqz_debug);
     }
     return r;
 }
-
-static errno_t test_tiny_window_1(void) { // good!
-//  const char* s = "ABCD1.ABCD2,ABCD3;ABCD4:ABCD5`ABCD6#ABCD7%ABCD8_ABCD9-"
-//                  "ABCDo.ABCDn,ABCDk;ABCDj:ABCDi`ABCDh#ABCDg%ABCDf_ABCDe-"
-//                  "ABCD1.ABCD2,ABCD1;ABCD2:ABCD3`ABCD2#ABCD1%ABCD0_ABCDx-";
-    const char* s =
-        "ABCD1,0,ABCD1+1+ABCD1+2_ABCD1_1_abcd1_4-ABCD1+5_1234";
-    //   012345678901234567890123456789012345678901234567890123456789
-    //   0         1         2         3         4         5
-    size_t n = strlen(s);
-    sqz_debug = true;
-    print_input(s);
-    const uint8_t* d = (const uint8_t*)s;
-    errno_t r = 0;
-    r = compress_and_verify(__func__, d, n, 32, !sqz_debug);
-    sqz_debug = false;
-    return r;
-}
-
-static errno_t test_tiny_window_2(void) { // good
-    const char* s =
-        "ABCD1,0,ABCD1+1+ABCD3+2_ABCD1_1_abcd1_4-ABCD1+5_1234";
-    //   012345678901234567890123456789012345678901234567890123456789
-    //   0         1         2         3         4         5
-    size_t n = strlen(s);
-    sqz_debug = true;
-    print_input(s);
-    const uint8_t* d = (const uint8_t*)s;
-    errno_t r = 0;
-    r = compress_and_verify(__func__, d, n, 32, !sqz_debug);
-    sqz_debug = false;
-    return r;
-}
-
 
 static errno_t test_files(void) {
     static const char* files[] = {
@@ -496,8 +517,8 @@ int main(int argc, const char* argv[]) {
             sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
 #if 0
-    if (r == 0) { r = test_tiny_window_1(); }
-    if (r == 0) { r = test_tiny_window_2(); }
+    if (r == 0) { r = test_case_1(); }
+    if (r == 0) { r = test_case_2(); }
     if (r == 0) { r = test_permutations(); }
     if (r == 0) { r = test_0_to_10(); }
     if (r == 0) { r = test_zeros(); }
@@ -511,15 +532,18 @@ int main(int argc, const char* argv[]) {
     if (r == 0) { r = test_files(); }
     if (r == 0) { r = test_corpus(); }
 #else
-//  if (r == 0) { r = test_tiny_window_1(); }
-//  if (r == 0) { r = test_tiny_window_2(); }
+//  if (r == 0) { r = test_case_1(); }
+//  if (r == 0) { r = test_case_2(); }
+//  if (r == 0) { r = test_case_3(); }
+//  if (r == 0) { r = test_case_4(); }
+//  if (r == 0) { r = test_case_5(); }
     if (r == 0) { r = test_permutations(); }
 //  if (r == 0) { r = test_0_to_10(); }
 //  if (r == 0) { r = test_zeros(); }
 //  if (r == 0) { r = test_rle(); }
 //  if (r == 0) { r = test_hello(); }
 //  if (r == 0) { r = test_short(); }
-//  if (r == 0) { r = test_long(); }
+//  if (r == 0) { r = test_long(); } // failing
 //  if (r == 0) { r = test_file(__FILE__); } // test.c source code:
 //  if (r == 0) { r = test_file("test/silesia.tar"); }
 //  if (r == 0) { r = test_file("test/bible.txt"); }
