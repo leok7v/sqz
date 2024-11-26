@@ -393,9 +393,6 @@ static void sqz_init_compress(struct sqz* s) {
     }
 }
 
-int removed8;
-int inserted8;
-
 static const char* esc(const void* a, size_t n) {
     static int ix;
     static char text[16][2 * 1024];
@@ -437,7 +434,6 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
                 bool seen = map_get(m, mlb, map_hash(m, mlb), &ix);
                 if (seen && (uint8_t*)m->p[ix] <= in + i - w) {
                     map_remove(m, ix);
-                    if (j == 8) { removed8++; }
                 }
             }
             if (j < 8) {
@@ -453,7 +449,6 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
                     bool b = map_put(m, in + i, map_hash(m, i64), i64);
                     assert(b); (void)b;
                     s->prev[index] = 0;
-                    if (j == 8) { inserted8++; }
                 } else {
                     const uint8_t* mp = (const uint8_t*)m->p[ix];
 //                  assert(memcmp(mp, in + i, 8) == 0);
@@ -481,6 +476,11 @@ static uint64_t sqz_debug_ix = UINT64_MAX; // nothing
 // static uint64_t sqz_debug_ix = 0; // everything
 // static uint64_t sqz_debug_ix = 54; // specific
 
+#define LZ_COMPARE_LINEAR
+#undef  LZ_COMPARE_LINEAR
+
+#ifdef LZ_COMPARE_LINEAR
+
 static void lz_linear(const uint8_t* in, const size_t n,
                       const size_t w, const size_t i,
                       size_t *ml, size_t *md) {
@@ -507,6 +507,8 @@ static void lz_linear(const uint8_t* in, const size_t n,
         *md = dst;
     }
 }
+
+#endif
 
 // lz_find() function finds longest match at a shortest distance and returns
 // ml: [2..max_len] inclusive
@@ -640,6 +642,7 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         s->rc.error = E2BIG;
         return;
     }
+    // TODO: preprocessing delta filter with subtract or maybe a + 128 - b
 prev_sum = 0;
 prev_max = 0;
 prev_count = 0;
@@ -667,13 +670,16 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
         size_t dst = 0;
 //      if (i == 54) { rt_breakpoint(); }
         sqz_find(s, in, n, w, i, incoming, &len, &dst);
-        size_t lin_len = 0;
-        size_t lin_dst = 0;
-        lz_linear(in, n, w, i, &lin_len, &lin_dst);
-        swear(lin_len == len && lin_dst == dst);
         assert(dst == 0 || 1 <= dst && dst <= UINT16_MAX + 1);
+        #ifdef LZ_COMPARE_LINEAR
+            size_t lin_len = 0;
+            size_t lin_dst = 0;
+            lz_linear(in, n, w, i, &lin_len, &lin_dst);
+            swear(lin_len == len && lin_dst == dst);
+        #endif
         int rep = -1;
         if (len > 0) {
+            // TODO: compare last_dist[len] vs last_dist without len
             const uint64_t last = last_dist[len];
             if (dst - 1 == ((last >>  0) & 0xFFFF)) { rep = 0; }
             if (dst - 1 == ((last >> 16) & 0xFFFF)) { rep = 1; }
@@ -722,6 +728,9 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
             }
             last_dist[len] <<= 16;
             last_dist[len]  |= (uint16_t)dst;
+            if (rep >= 0) {
+                // TODO: bring rep to the front of the queue
+            }
         }
         sqz_insert_next(s, in, n8, w, i, len, incoming, leaving);
     }
@@ -739,8 +748,7 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
     rc_encode(&s->rc, &s->pm_tag, 0b00);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
-//  printf("inserted8 %d removed8 %d\n", inserted8, removed8);
-    if (prev_count > 0) {
+    if (prev_count > 0 && prev_max > 1) {
         printf("prev[] simple avg: %.1f max: %2zu\n",
                (double)prev_sum / prev_count, prev_max);
     }
@@ -762,6 +770,7 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
         if (literal) {
             if (i < n) {
                 uint8_t c = rc_decode(&s->rc, &s->pm_byte);
+                // TODO: dump XOR rsults and eyeball them in respect of the input arguments
                 if (delta >= 7 && after) { c ^= d[after]; after = 0; }
                 d[i++] = c;
                 delta = sqz_lit[delta];

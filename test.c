@@ -2,6 +2,8 @@
 #include "rt/fileio.h"
 #include "sqz/sqz.h"
 
+// TODO: compress to memory not a file
+
 enum { window_bits = 16 };
 
 // window_bits = 16:
