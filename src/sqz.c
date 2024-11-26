@@ -36,34 +36,37 @@ bool sqz_debug;
 #define sqz_trace(...) do { if (sqz_debug) { printf(__VA_ARGS__); } } while (0)
 
 static void map_init(struct map* m, void** p, size_t n, size_t b) {
-    assert(16 < n && n <= (1u << 24) && 3 <= b && b <= 4);
-    if ( !(16 < n && n <= (1u << 24) && 3 <= b && b <= 4) ) {
+    assert(16 < n && n <= (1u << 24) && 3 <= b && b <= 8);
+    if ( !(16 < n && n <= (1u << 24) && 3 <= b && b <= 8) ) {
         exit(1); // this is not a generic map implementation
     }
     memset(m, 0, sizeof(*m));
     m->p = p;
     m->n = n;
-    m->m = b == 3 ? 0x00FFFFFFu : 0xFFFFFFFFu;
+    assert(3 <= b && b <= 8);
+    m->m = b < 8 ? (1uLL << (b * 8)) - 1 : UINT64_MAX;
     memset(m->p, 0, n * sizeof(m->p[0]));
 }
 
-static inline uint32_t map_hash_key(uint32_t k) {
-    k ^= k >> 13; // Bob Jenkins' hash
-    k *= 0x85EBCA6Bu;
-    k ^= k >> 16;
+static inline uint64_t map_hash_key(uint64_t k) {
+    k ^= k >> 33; // Bob Jenkins' hash (modified for 64-bit keys)
+    k *= 0xFF51AFD7ED558CCDu;
+    k ^= k >> 33;
+    k *= 0xC4CEB9FE1A85EC53u;
+    k ^= k >> 33;
     return k;
 }
 
-static inline size_t map_hash(struct map* m, uint32_t k) {
+static inline size_t map_hash(struct map* m, uint64_t k) {
     return (size_t)(map_hash_key(k) % m->n);
 }
 
-static inline bool map_get(struct map* m, uint32_t k,
+static inline bool map_get(struct map* m, uint64_t k,
                            const size_t s, size_t* ix) {
     size_t i = s; // start
-    const uint32_t mask = m->m;
+    const uint64_t mask = m->m;
     while (m->p[i]) {
-        if ((mask & *((uint32_t*)m->p[i])) == k) {
+        if ((mask & *((uint64_t*)m->p[i])) == k) {
             *ix = i;
             return true;
         } else {
@@ -80,8 +83,8 @@ static inline void map_remove(struct map* m, size_t i) {
     for (;;) {
         x = (x + 1) % m->n;
         if (!m->p[x]) { break; }
-        const uint32_t b4 = *(uint32_t*)m->p[x];
-        size_t h = map_hash(m, b4 & m->m);
+        const uint64_t b64 = *(uint64_t*)m->p[x];
+        size_t h = map_hash(m, b64 & m->m);
         // Check if `h` lies within [i, x), accounting for wrap-around:
         const bool can_move = i <= x ? x < h || h <= i :
                                        x < h && h <= i;
@@ -94,11 +97,11 @@ static inline void map_remove(struct map* m, size_t i) {
 }
 
 static inline bool map_put(struct map* m, const void* p,
-                      const size_t h, uint32_t k) {
-    const uint32_t mask = m->m;
+                           const size_t h, uint64_t k) {
+    const uint64_t mask = m->m;
     size_t i = h;
     while (m->p[i]) {
-        if ((mask & *((uint32_t*)m->p[i])) == k) {
+        if ((mask & *((uint64_t*)m->p[i])) == k) {
             m->p[i] = p;
             return true;
         } else {
@@ -109,26 +112,6 @@ static inline bool map_put(struct map* m, const void* p,
     }
     m->p[i] = p;
     return true;
-}
-
-static inline bool map_put3(struct map* m, const void* p, uint32_t b3) {
-    assert((b3 & ~0xFFFFFFu) == 0 && m->m == 0x00FFFFFFu);
-    return map_put(m, p, map_hash(m, b3), b3);
-}
-
-static inline bool map_put4(struct map* m, const void* p, uint32_t b4) {
-    assert(m->m == 0xFFFFFFFFu);
-    return map_put(m, p, map_hash(m, b4), b4);
-}
-
-static inline bool map_get3(struct map* m, uint32_t b3, size_t* ix) {
-    assert((b3 & ~0xFFFFFFu) == 0 && m->m == 0x00FFFFFFu);
-    return map_get(m, b3, map_hash(m, b3), ix);
-}
-
-static inline bool map_get4(struct map* m, uint32_t b4, size_t* ix) {
-    assert(m->m == 0xFFFFFFFFu);
-    return map_get(m, b4, map_hash(m, b4), ix);
 }
 
 static inline int32_t ft_lsb(int32_t i) { // least significant bit only
@@ -297,215 +280,122 @@ void sqz_init(struct sqz* s) {
 
 static void sqz_init_compress(struct sqz* s) {
     memset(s->prev, 0, sizeof(s->prev));
-    memset(s->tree, 0, sizeof(s->tree));
     memset(s->map2, 0, sizeof(s->map2));
-    map_init(&s->map3, s->map3e, sizeof(s->map3e) / sizeof(s->map3e[0]), 3);
-    map_init(&s->map4, s->map4e, sizeof(s->map4e) / sizeof(s->map4e[0]), 4);
+    for (size_t j = 0; j < countof(s->maps); j++) {
+        map_init(&s->maps[j], s->map_e[j], countof(s->map_e[j]), j + 3);
+    }
 }
 
-static void sqz_node_verify(const struct tree* node) {
-    if (node) {
-        if (!node->ld && !node->rd) {
-            // no descendants
+int removed8;
+int inserted8;
+
+static const char* esc(const void* a, size_t n) {
+    static int ix;
+    static char text[16][2 * 1024];
+    const char* s = (const char*)a;
+    char* d = text[ix];
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\r') {
+            d[j++] = '\\';
+            d[j++] = 'r';
+        } else if (s[i] == '\n') {
+            d[j++] = '\\';
+            d[j++] = 'n';
+        } else if (0x20 <= s[i] && s[i] <= 0x7F) {
+            d[j++] = s[i];
         } else {
-            assert(node->ld != node->rd);
-            if (node->ld) {
-                assert(node->ld->p < node->p);
-                assert(node->ld->pn == node);
-                assert(memcmp(node->ld->p, node->p, 4) == 0);
-                sqz_node_verify(node->ld);
-            }
-            if (node->rd) {
-                assert(node->rd->p < node->p);
-                assert(node->rd->pn == node);
-                assert(memcmp(node->rd->p, node->p, 4) == 0);
-                sqz_node_verify(node->rd);
-            }
+            d[j++] = '\\';
+            d[j++] = 'x';
+            d[j++] = "0123456789ABCDEF"[(((uint8_t)s[i]) / 16) & 0xF];
+            d[j++] = "0123456789ABCDEF"[((uint8_t)s[i]) % 16];
         }
     }
-}
-
-static inline size_t sqz_tree_index_of(const struct sqz* s,
-                                       const struct tree* nd, size_t w) {
-    return (nd - s->tree) % w;
-}
-
-static void print_node(struct sqz* s, size_t w, char kind,
-                       const struct tree* nd, size_t indent) {
-    if (nd) {
-        for (size_t i = 0; i < indent * 2; i++) { printf("%c", 0x20); }
-        printf("%c %zd \"%.16s\"\n", kind, sqz_tree_index_of(s, nd, w), nd->p);
-        if (nd->ld) { print_node(s, w, 'L', nd->ld, indent + 1); }
-        if (nd->rd) { print_node(s, w, 'R', nd->rd, indent + 1); }
-    }
-}
-
-static void print_tree(struct sqz* s, size_t w, const struct tree* nd) {
-    print_node(s, w, '+', nd, 0);
-    printf("\n");
-}
-
-static int tree_depth(const struct tree* nd) {
-    return !nd ? 0 : 1 + tree_depth(nd->ld) + tree_depth(nd->rd);
-}
-
-static void sqz_tree_remove(struct tree* node) {
-    if (node->pn) {
-        if (node->pn->ld == node) {
-            node->pn->ld = 0;
-        } else if (node->pn->rd == node) {
-            node->pn->rd = 0;
-        } else {
-            assert(false); // bad tree
-        }
-    }
-    node->p = 0; // TODO: not necessary
-    node->pn = 0;
-    node->ld = 0;
-    node->rd = 0;
-}
-
-static void sqz_tree_rebalance(struct tree* nd, size_t max_len) {
-    assert(4 <= max_len && max_len <= sqz_max_len);
-    sqz_node_verify(nd);
-    if (nd->ld && !nd->rd && nd->ld->rd) {
-        struct tree* lc = nd->ld; // left child
-        struct tree* rg = lc->rd; // right grandchild
-// TODO: for equal values the higher ->p value preferred
-        if (memcmp(nd->p, rg->p, max_len) <= 0) {
-            nd->rd = rg;
-            lc->rd = 0;
-            rg->pn = nd;
-        }
-        sqz_tree_rebalance(lc, max_len);
-    } else if (nd->rd && !nd->ld && nd->rd->ld) {
-        struct tree* rc = nd->rd; // right child
-        struct tree* lg = rc->ld; // left grandchild
-// TODO: for equal values the higher ->p value preferred
-        if (memcmp(lg->p, rc->p, max_len) > 0) {
-            nd->ld = lg;
-            rc->ld = 0;
-            lg->pn = nd;
-        }
-        sqz_tree_rebalance(rc, max_len);
-    }
-    sqz_node_verify(nd);
-}
-
-static inline void sqz_tree_insert(struct sqz* s, size_t i, const size_t n,
-                                   size_t w, size_t p) {
-    struct tree* nd = &s->tree[i & (w - 1)];
-    struct tree* pr = &s->tree[p & (w - 1)];
-    size_t max_len = n - i + 4 > sqz_max_len ? sqz_max_len : n - i + 4;
-    if (memcmp(nd->p, pr->p, max_len) <= 0) { nd->ld = pr; } else { nd->rd = pr; }
-    pr->pn = nd;
-//  print_tree(s, w, nd);
-    sqz_tree_rebalance(nd, max_len);
-//  print_tree(s, w, nd);
+    d[j] = 0;
+    ix = (ix + 1) % countof(text);
+    return d;
 }
 
 static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
-                       const size_t w, const size_t i, uint32_t incoming,
-                       uint32_t leaving) {
+                       const size_t w, const size_t i, uint64_t incoming,
+                       uint64_t leaving) {
     assert(sqz_min_window <= w && w <= sqz_max_window);
     assert(((w - 1) & w) == 0); // window is power of 2
-    if (i < n - 4) {
-        bool b;
-        if (i >= w) {
-            const uint32_t w4 = leaving;
-            size_t ix;
-            b = map_get3(&s->map3, w4 & 0xFFFFFF, &ix);
-            if (b && (uint8_t*)s->map3.p[ix] <= in + i - w) {
-                map_remove(&s->map3, ix);
+    if (i < n) {
+        for (size_t j = 3; j <= 8; j++) {
+            struct map* m = &s->maps[j - 3];
+            if (i >= w) {
+                const uint64_t mlb = leaving & m->m; // masked leaving bytes
+                size_t ix;
+                bool seen = map_get(m, mlb, map_hash(m, mlb), &ix);
+                if (seen && (uint8_t*)m->p[ix] <= in + i - w) {
+                    map_remove(m, ix);
+                    if (j == 8) { removed8++; }
+                }
             }
-            b = map_get4(&s->map4, w4, &ix);
-            if (b && (uint8_t*)s->map4.p[ix] <= in + i - w) {
-                map_remove(&s->map4, ix);
+            if (j < 8) {
+                const uint64_t mib = incoming & m->m; // masked incoming bytes
+                bool b = map_put(m, in + i, map_hash(m, mib), mib);
+                assert(b); (void)b;
+            } else { // map8 has linked list of distance to previous
+                const size_t index = i & (w - 1);
+                const uint64_t i64 = incoming; // 64 bit of incoming
+                size_t ix;
+                bool seen = map_get(m, i64, map_hash(m, i64), &ix);
+                if (!seen) {
+                    bool b = map_put(m, in + i, map_hash(m, i64), i64);
+                    assert(b); (void)b;
+                    s->prev[index] = 0;
+                    if (j == 8) { inserted8++; }
+                } else {
+                    const uint8_t* mp = (const uint8_t*)m->p[ix];
+//                  assert(memcmp(mp, in + i, 8) == 0);
+                    // previous position of 8 bytes entry of 'pm' previous match:
+                    // overwrite with shorter distance for the same 8 bytes:
+                    m->p[ix] = in + i;
+                    if (mp + w >= in + i) { // inside window: pm >= in + i - w
+                        size_t pp = mp - in;
+                        s->prev[index] = i - pp;
+                    } else {
+                        s->prev[index] = 0;
+                    }
+                }
             }
         }
-        const uint32_t b4 = incoming;
-        b = map_put3(&s->map3, in + i, b4 & 0x00FFFFFFu);
-        assert(b);
-        const size_t index = i % w;
-        sqz_tree_remove(&s->tree[index]);
-        s->tree[index].p = in + i;
-        size_t ix;
-        bool seen = map_get4(&s->map4, b4, &ix);
-        if (!seen) {
-            // TODO: can result of this map_put be reused in next
-            // find() instead if calling map_get4()?
-            b = map_put4(&s->map4, in + i, b4);
-            assert(b);
-            s->prev[index] = 0;
-        } else {
-            // previous position of 4 bytes entry of 'pm' previous match:
-            const uint8_t* pm = (const uint8_t*)s->map4.p[ix];
-            // overwrite with shorter distance for the same 4 bytes:
-            s->map4.p[ix] = in + i;
-            if (pm + w >= in + i) { // inside window: pm >= in + i - w
-                size_t pp = pm - in;
-                s->prev[index] = i - pp;
-                sqz_tree_insert(s, i, n, w, pp);
-            } else {
-                s->prev[index] = 0;
-            }
-        }
-        s->map2[b4 & 0xFFFFu] = i + 1;
+        s->map2[incoming & 0xFFFFu] = i + 1;
     }
 }
 
 static uint64_t prev_sum;
 static uint64_t prev_count;
 static size_t   prev_max;
-static int      tree_max_depth;
-static int      tree_max_search;
-static uint64_t tree_search_sum;
-static int      tree_search;
 
-static uint64_t sqz_debug_ix = UINT64_MAX;
-// static uint64_t sqz_debug_ix = 40;
+static uint64_t sqz_debug_ix = UINT64_MAX; // nothing
+// static uint64_t sqz_debug_ix = 0; // everything
+// static uint64_t sqz_debug_ix = 54; // specific
 
-static inline void sqz_tree_find(struct sqz* s,
-                                 const uint8_t* in, size_t i, size_t n,
-                                 size_t w, const struct tree* nd,
-                                 size_t *ml, size_t *md) {
-    tree_search++;
-    size_t len = *ml;
-    size_t dst = *md;
-    const size_t max_len = n - i > sqz_max_len ? sqz_max_len : n - i;
-    assert(len < max_len);
-    size_t k = 4; // because with 4 bytes are the same
-    while (k < max_len && nd->p[k] == in[i + k]) { k++; }
-    if (k > len || k == len && i - (nd->p - in) < dst) {
-        len = k;
-        dst = i - (nd->p - in);
-//      if (sqz_debug_ix == i) {
-            sqz_trace("[%2zu] p: %2zu \"%.*s\" \"%.*s\" len: %2zu dst: %2zu\n",
-                        i, sqz_tree_index_of(s, nd, w),
-                        (int)len, in + i, (int)len, nd->p, len, dst);
-//      }
-    }
-    if (len < max_len) {
-        size_t ld_len = len;
-        size_t ld_dst = dst;
-        if (nd->ld) {
-            sqz_tree_find(s, in, i, n, w, nd->ld, &ld_len, &ld_dst);
+static void lz_linear(const uint8_t* in, const size_t n,
+                      const size_t w, const size_t i,
+                      size_t *ml, size_t *md) {
+    assert(*ml == 0); // caller's responsibility
+    assert(*md == 0);
+    if (1 <= i && i < n - 8) {
+        size_t len = 0;
+        size_t dst = 0;
+        size_t j = i - 1;
+        size_t min_j = i >= w ? i - w : 0;
+        for (;;) {
+            size_t max_k = n - i > sqz_max_len ? sqz_max_len : n - i;
+            size_t k = 0;
+            while (k < max_k && in[j + k] == in[i + k]) { k++; }
+            if (k >= 2 && k > len) {
+                len = k;
+                dst = i - j;
+                if (len == sqz_max_len) { break; }
+            }
+            if (j == min_j) { break; }
+            j--;
         }
-        size_t rd_len = len;
-        size_t rd_dst = dst;
-        if (nd->rd) {
-            sqz_tree_find(s, in, i, n, w, nd->rd, &rd_len, &rd_dst);
-        }
-        if (rd_len > len || rd_len == len && rd_dst < dst) {
-            len = rd_len;
-            dst = rd_dst;
-        }
-        if (ld_len > len || ld_len == len && ld_dst < dst) {
-            len = ld_len;
-            dst = ld_dst;
-        }
-    }
-    if (len > 0) {
         *ml = len;
         *md = dst;
     }
@@ -517,99 +407,92 @@ static inline void sqz_tree_find(struct sqz* s,
 
 static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
                             const size_t w, const size_t i,
-                            uint32_t incoming,
+                            uint64_t incoming,
                             size_t *ml, size_t *md) {
     assert(sqz_min_window <= w && w <= sqz_max_window);
     assert(((w - 1) & w) == 0); // window is power of 2
     assert(*ml == 0); // caller's responsibility
     assert(*md == 0);
+    const size_t max_k = n - i > sqz_max_len ? sqz_max_len : n - i;
     size_t len = 0;
     size_t dst = 0;
-    const uint32_t b4 = incoming;
-    size_t ix;
-    bool b = map_get4(&s->map4, b4, &ix);
-    size_t tl = 0;
-    size_t td = 0;
-    if (b) {
-        if (sqz_debug_ix == i) {
-            sqz_trace("[%2zd] found in: \"%.5s\" map4: \"%.5s\"\n", i, in + i, s->map4.p[ix]);
-        }
-        size_t p = (const uint8_t*)s->map4.p[ix] - in;
-        tl = 4;
-        td = i - p;
-        if (sqz_debug_ix == i) {
-            print_tree(s, w, &s->tree[p & (w - 1)]);
-            rt_breakpoint();
-        }
-        int depth = tree_depth(&s->tree[p & (w - 1)]);
-        if (depth > tree_max_depth) { tree_max_depth = depth; }
-        tree_search = 0;
-        sqz_tree_find(s, in, i, n, w, &s->tree[p & (w - 1)], &tl, &td);
-        tree_search_sum += tree_search;
-        if (tree_search > tree_max_search) { tree_max_search = tree_search; }
-        const size_t max_k = n - i > sqz_max_len ? sqz_max_len : n - i;
-        len = 4;
-        dst = i - p;
-        // simple average iterations of the following while loop
-        // on "silesia.tar" is ~154 upto ~430 on test_long (random)
-        size_t prev_chain = 0;
-        for (;;) {
-            assert(memcmp(&b4, in + p, 4) == 0);
-//          if (sqz_debug_ix == i) {
-                sqz_trace("[%2zu] p: %2zu \"%.*s\" \"%.*s\" len: %2zu ",
-                          i, p, (int)len + 1, in + i, (int)len + 1, in + p, len);
-//          }
-            size_t k = 4; // because with 4 bytes are the same
-            while (k < max_k && in[p + k] == in[i + k]) { k++; }
-            if (k > len) {
-                len = k;
+    const uint64_t i64 = incoming;
+    for (size_t j = 8; j >= 3 && len == 0; j--) {
+        struct map* m = &s->maps[j - 3];
+        size_t ix;
+        if (j == 8) {
+            if (map_get(m, i64, map_hash(m, i64), &ix)) {
+                const uint8_t* mp = (const uint8_t*)m->p[ix];
+                size_t p = mp - in;
+                if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
+                    sqz_trace("[%2zd] found in: \"%s\" map%d: \"%s\"\n", i, esc(in + i, 8), j, esc(mp, 8));
+                }
+                len = 8;
                 dst = i - p;
-//              if (sqz_debug_ix == i) {
-                    sqz_trace("len: %zu, dst: %zu \"%.*s\"\n", len, dst, (int)len, in + i);
-//              }
-                if (len == sqz_max_len) { break; }
-            } else {
-//              if (sqz_debug_ix == i) {
-                    sqz_trace("\n");
-//              }
+                // simple average iterations of the following while loop
+                // on "silesia.tar" is ~154 upto ~430 on test_long (random)
+                size_t prev_chain = 0;
+                for (;;) {
+                    assert(memcmp(&i64, mp, 8) == 0); // TODO: paranoia remove
+                    if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
+                        size_t ln = len + 1;
+                        if (ln > 16) { ln = 16; }
+                        sqz_trace("[%2zu] p: %2zu \"%.*s\" \"%.*s\" len: %2zu ",
+                            i, p, (int)len + 1, in + i, (int)ln, esc(mp, ln), len);
+                    }
+                    size_t k = 8; // because first 8 bytes are the same
+                    while (k < max_k && in[p + k] == in[i + k]) { k++; }
+                    if (k > len) {
+                        len = k;
+                        dst = i - p;
+                        if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
+                            sqz_trace("len: %zu, dst: %zu \"%.*s\"\n", len, dst, (int)len, in + i);
+                        }
+                        if (len == sqz_max_len) { break; }
+                    } else {
+                        if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
+                            sqz_trace("\n");
+                        }
+                    }
+                    size_t d = s->prev[p & (w - 1)];
+                    if (d == 0) { break; }
+                    p -= d;
+                    // p < i - w won't work because unsigned i - w for i < w
+                    if (p + w < i) { break; } // unsigned version of: p < i - w
+                    prev_chain++;
+                    if (memcmp(in + p, in + i, 8) != 0) {
+                        assert(false); // TODO: is it ever overwritten?
+                        break;
+                    }
+                }
+                if (prev_chain > 0) {
+                    prev_sum += prev_chain;
+                    prev_count++;
+                    if (prev_chain > prev_max) { prev_max = prev_chain; }
+                }
             }
-            size_t d = s->prev[p & (w - 1)];
-            if (d == 0) { break; }
-            p -= d;
-            // p < i - w won't work because unsigned i - w for i < w
-            if (p + w < i) { break; } // unsigned version of: p < i - w
-            prev_chain++;
-            if (memcmp(in + p, in + i, 4) != 0) { break; } // overwritten
-        }
-        if (prev_chain > 0) {
-            prev_sum += prev_chain;
-            prev_count++;
-            if (prev_chain > prev_max) { prev_max = prev_chain; }
-        }
-        if (len >= 4 || tl >= 4) {
-            // tree search may work better because children moved up
-            assert(tl == len);
-            assert(td == dst);
-            assert(tl >= len);
-            if (tl == len) {
-                assert(td <= dst);
-            } else {
-                assert(0 < td && td <= w);
+        } else if (len == 0) {
+            if (map_get(m, i64 & m->m, map_hash(m, i64 & m->m), &ix)) {
+                const uint8_t* mp = (const uint8_t*)m->p[ix];
+                const size_t p = mp - in;
+                if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
+                    sqz_trace("[%2zd] found in: \"%s\" map%d: \"%s\"\n", i, in + i, j, esc(mp, 8));
+                }
+                if (i - p <= w) {
+                    len = j;
+                    dst = i - p;
+                }
             }
         }
     }
     if (len == 0) {
-        b = map_get3(&s->map3, b4 & 0xFFFFFF, &ix);
-        if (b) {
-            size_t p = (const uint8_t*)s->map3.p[ix] - in;
-            if (i - p <= w) { len = 3; dst = i - p; }
-        }
-    }
-    if (len == 0) {
-        size_t p = s->map2[b4 & 0xFFFF];
+        size_t p = s->map2[incoming & 0xFFFF];
         if (p > 0) {
             p--; // because map2[] keep position + 1
-            if (i - p <= w) { len = 2; dst = i - p; }
+            if (i - p <= w) {
+                len = 2;
+                dst = i - p;
+            }
         }
     }
     if (len > 0) {
@@ -618,22 +501,22 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     }
 }
 
-#define sqz_update_incoming_leaving(incoming, leaving, in, i, n4, w) do {   \
+#define sqz_update_incoming_leaving(incoming, leaving, in, i, n8, w) do {   \
     incoming >>= 8;                                                         \
-    if (i < n4) {                                                           \
-        incoming |= (((uint32_t)in[(i) + 3]) << 24);                        \
+    if (i < n8) {                                                           \
+        incoming |= (((uint64_t)in[(i) + 7]) << 56);                        \
     }                                                                       \
     if (i > w) {                                                            \
-        leaving  = (leaving  >> 8) | (((uint32_t)in[(i) - (w) + 3]) << 24); \
+        leaving  = (leaving >> 8) | (((uint64_t)in[(i) - (w) + 7]) << 56);  \
     }                                                                       \
 } while (0)
 
-#define sqz_insert_next(s, in, n4, w, i, len, incoming, leaving) do { \
+#define sqz_insert_next(s, in, n8, w, i, len, incoming, leaving) do { \
     const size_t next_i = i + ((len) > 0 ? (len) : 1);                \
     while (i < next_i) {                                              \
-        sqz_insert(s, in, n4, w, i, incoming, leaving);               \
+        sqz_insert(s, in, n8, w, i, incoming, leaving);               \
         i++;                                                          \
-        sqz_update_incoming_leaving(incoming, leaving, in, i, n4, w); \
+        sqz_update_incoming_leaving(incoming, leaving, in, i, n8, w); \
     }                                                                 \
 } while (0)
 
@@ -653,9 +536,6 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
 prev_sum = 0;
 prev_max = 0;
 prev_count = 0;
-tree_max_depth = 0;
-tree_max_search = 0;
-tree_search_sum = 0;
 sqz_debug = sqz_debug_ix < UINT64_MAX;
     sqz_init_compress(s);
     uint8_t  delta   = 5; // >= 7 use XOR delta predictor
@@ -669,26 +549,31 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
         rc_encode(&s->rc, &s->pm_byte, in[0]);
         delta = sqz_lit[delta];
     }
-    uint32_t incoming = *(uint32_t*)in;
-    uint32_t leaving = incoming;
+    uint64_t incoming = *(uint64_t*)in;
+    uint64_t leaving = incoming;
     sqz_insert(s, in, n, w, 0, incoming, leaving);
-    const size_t n4 = n >= 4 ? n - 4 : 0;
-    sqz_update_incoming_leaving(incoming, leaving, in, 1, n4, w);
+    const size_t n8 = n >= 8 ? n - 8 : 0;
+    sqz_update_incoming_leaving(incoming, leaving, in, 1, n8, w);
     size_t i = 1;
-    while (i < n4) {
+    while (i < n8) {
         size_t len = 0;
-        size_t dist = 0;
-        sqz_find(s, in, n, w, i, incoming, &len, &dist);
-        assert(dist == 0 || 1 <= dist && dist <= UINT16_MAX + 1);
+        size_t dst = 0;
+//      if (i == 54) { rt_breakpoint(); }
+        sqz_find(s, in, n, w, i, incoming, &len, &dst);
+        size_t lin_len = 0;
+        size_t lin_dst = 0;
+        lz_linear(in, n, w, i, &lin_len, &lin_dst);
+        swear(lin_len == len && lin_dst == dst);
+        assert(dst == 0 || 1 <= dst && dst <= UINT16_MAX + 1);
         int rep = -1;
         if (len > 0) {
             const uint64_t last = last_dist[len];
-            if (dist - 1 == ((last >>  0) & 0xFFFF)) { rep = 0; }
-            if (dist - 1 == ((last >> 16) & 0xFFFF)) { rep = 1; }
-            if (dist - 1 == ((last >> 32) & 0xFFFF)) { rep = 2; }
-            if (dist - 1 == ((last >> 48) & 0xFFFF)) { rep = 3; }
+            if (dst - 1 == ((last >>  0) & 0xFFFF)) { rep = 0; }
+            if (dst - 1 == ((last >> 16) & 0xFFFF)) { rep = 1; }
+            if (dst - 1 == ((last >> 32) & 0xFFFF)) { rep = 2; }
+            if (dst - 1 == ((last >> 48) & 0xFFFF)) { rep = 3; }
         }
-        const uint8_t too_far = len == 2 && rep < 0 && dist > sqz_max_len2_dist;
+        const uint8_t too_far = len == 2 && rep < 0 && dst > sqz_max_len2_dist;
         const uint8_t literal = len == 0 || too_far;
         rc_encode(&((s)->rc), &((s)->pm_bit0), literal);
         if (literal) { // encode literal byte
@@ -698,21 +583,21 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
             rc_encode(&((s)->rc), &((s)->pm_byte), c);
             delta = sqz_lit[delta];
         } else {
-            after = i - dist + len;
-            dist--; // [0..UINT16_MAX]
+            after = i - dst + len;
+            dst--; // [0..UINT16_MAX]
             if (len <= 4) {
                 rc_encode(&s->rc, &s->pm_tag, ((uint8_t)(len - 1)) << 1 | (rep >= 0));
                 if (rep >= 0) {
                     rc_encode(&s->rc, &s->pm_rep, (uint8_t)rep);
                     delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
                 } else if (len == 2) {
-                    assert(dist <= UINT8_MAX);
-                    rc_encode(&s->rc, &s->pm_dist, (uint8_t)dist);
+                    assert(dst <= UINT8_MAX);
+                    rc_encode(&s->rc, &s->pm_dist, (uint8_t)dst);
                     delta = sqz_match[delta];
                 } else {
-                    assert(dist <= UINT16_MAX);
-                    rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
-                    rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
+                    assert(dst <= UINT16_MAX);
+                    rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dst & 0xFF));
+                    rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dst >> 8));
                     delta = sqz_match[delta];
                 }
             } else {
@@ -722,16 +607,16 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
                     rc_encode(&s->rc, &s->pm_rep, (uint8_t)rep);
                     delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
                 } else {
-                    assert(dist <= UINT16_MAX);
-                    rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dist & 0xFF));
-                    rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dist >> 8));
+                    assert(dst <= UINT16_MAX);
+                    rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dst & 0xFF));
+                    rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dst >> 8));
                     delta = sqz_match[delta];
                 }
             }
             last_dist[len] <<= 16;
-            last_dist[len]  |= (uint16_t)dist;
+            last_dist[len]  |= (uint16_t)dst;
         }
-        sqz_insert_next(s, in, n4, w, i, len, incoming, leaving);
+        sqz_insert_next(s, in, n8, w, i, len, incoming, leaving);
     }
     while (i < n) {
         const uint8_t literal = 1;
@@ -747,12 +632,10 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
     rc_encode(&s->rc, &s->pm_tag, 0b00);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
+//  printf("inserted8 %d removed8 %d\n", inserted8, removed8);
     if (prev_count > 0) {
-        printf("prev[] simple avg: %.1f max: %2zu \n"
-               "tree max depth: %d search: %d avg: %.1f\n",
-               (double)prev_sum / prev_count, prev_max,
-                tree_max_depth, tree_max_search,
-                (double)tree_search_sum / prev_count);
+        printf("prev[] simple avg: %.1f max: %2zu\n",
+               (double)prev_sum / prev_count, prev_max);
     }
 }
 

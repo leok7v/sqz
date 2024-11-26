@@ -11,7 +11,7 @@
 #define LZ_VERBOSE
 #undef  LZ_VERBOSE
 
-// in DEBUG lz_linear_search() + verify is incredibly slow
+// in DEBUG lz_linear() + verify is incredibly slow
 #undef  LZ_ALL_TESTS
 #define LZ_ALL_TESTS
 

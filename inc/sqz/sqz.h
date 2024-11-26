@@ -46,8 +46,7 @@ struct range_coder {
 struct map {
     const void** p; // p[n]
     size_t       n; // number of entries in the map (max_window * 4)
-    uint32_t     m; // mask 0xFFFFFF for 3 bytes and 0xFFFFFFFFu for 4 bytes
-    uint32_t     padding; // shut up annoying compiler warning
+    uint64_t     m; // mask 0xFFFFFF for 3 bytes and 0xFFFFFFFFu for 4 bytes
 };
 
 struct tree {
@@ -72,13 +71,10 @@ struct sqz {
     // TODO: we may have 2 types decompressor and compressor
     //       because decompress do not need maps
     size_t prev[sqz_max_window]; // distance to previous `i` of 4 bytes entry
-    struct tree tree[sqz_max_window];
-    struct map map4;
-    struct map map3;
+    struct map maps[6]; // map[5]...map[0] for sequences 8 to 3 bytes long
     size_t     map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes
     // entries for the maps (75% occupancy):
-    void* map3e[sqz_max_window + sqz_max_window / 2];
-    void* map4e[sqz_max_window + sqz_max_window / 2];
+    void* map_e[6][sqz_max_window + sqz_max_window / 2];
 };
 
 // TODO: we need better range coder callback to remove this ugly requirement

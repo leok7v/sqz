@@ -5,11 +5,14 @@
 enum { window_bits = 16 };
 
 // window_bits = 16:
-// 4,436,173 -> 1,346,191 30.35% "bible.txt"
+// "bible.txt" 4,436,173
+// -> 1,346,191 30.35%
 // zip: (MS Windows)
-// 4,436,173 -> 1,398,871 31.5%  "bible.txt"
+// -> 1,398,871 31.5%
+// 7z:
+// -> 1,052,529 23.72%
 
-// Test is limited to "size_t" and "int" precision
+// Tests are limited to "size_t" and "int" precision
 
 static const char* thousands(uint64_t value) {
     static char text[32][64];
@@ -26,6 +29,31 @@ static const char* thousands(uint64_t value) {
         gc++;
     } while (value > 0);
     return &s[i];
+}
+
+static bool is_ascii(const uint8_t* s, const size_t n) {
+    bool ascii = true;
+    for (size_t i = 0; i < n && ascii; i++) {
+        ascii = 0x20 <= s[i] && s[i] <= 0x7F;
+    }
+    return ascii;
+}
+
+static void print_ascii_or_hex(const uint8_t* s, const size_t n) {
+    if (is_ascii(s, n)) {
+        size_t mn = min(n, 32);
+        if (mn == n) {
+            printf("\"%.*s\"", (int)mn, s);
+        } else {
+            printf("\"%.*s...\"", (int)mn, s);
+        }
+    } else {
+        printf("0x");
+        size_t mn = min(n, 16);
+        for (size_t i = 0; i < mn; i++) { printf("%02X", s[i]); }
+        if (mn != n) { printf("..."); }
+    }
+    printf("\n");
 }
 
 static double entropy(uint64_t* freq, size_t n) { // Shannon entropy
@@ -384,40 +412,48 @@ static errno_t test_case_1(void) { // good!
 //                  "ABCD1.ABCD2,ABCD1;ABCD2:ABCD3`ABCD2#ABCD1%ABCD0_ABCDx-";
     const char* s =
         "ABCD1,0,ABCD1+1+ABCD1+2_ABCD1_1_abcd1_4-ABCD1+5_1234";
-    //   012345678901234567890123456789012345678901234567890123456789
-    //   0         1         2         3         4         5
+    //   012345678901234567890123456789012345678901234567890123456789012
+    //   0         1         2         3         4         5         6
     return debug_in_window(__func__, s, 32);
 }
 
 static errno_t test_case_2(void) { // good
     const char* s =
         "ABCD1,0,ABCD1+1+ABCD3+2_ABCD1_1_abcd1_4-ABCD1+5_1234";
-    //   012345678901234567890123456789012345678901234567890123456789
-    //   0         1         2         3         4         5
+    //   012345678901234567890123456789012345678901234567890123456789012
+    //   0         1         2         3         4         5         6
     return debug_in_window(__func__, s, 32);
 }
 
 static errno_t test_case_3(void) { // good
     const char* s =
         "STUVWJKLMNOPQRRYZQRLMNNNNNSRSTUVWTUVWNOPQRNOPQRNOPQVWXBVWXYZDGH";
-    //   012345678901234567890123456789012345678901234567890123456789
-    //   0         1         2         3         4         5
+    //   012345678901234567890123456789012345678901234567890123456789012
+    //   0         1         2         3         4         5         6
     return debug_in_window(__func__, s, 32);
 }
 
 static errno_t test_case_4(void) {
     const char* s = // 7 long previous search chain
         "HIJDEFGGGGGGGGGGGEFGHGGGGGGGGGGGIIJTUVWXYZCDECDECTCDECYZAABCDEF";
-    //   012345678901234567890123456789012345678901234567890123456789
-    //   0         1         2         3         4         5
+    //   012345678901234567890123456789012345678901234567890123456789012
+    //   0         1         2         3         4         5         6
     return debug_in_window(__func__, s, 32);
 }
 
 static errno_t test_case_5(void) {
     const char* s =
         "FGHIJKLMNOTUVWXYZABCKXMXJKLMNOPLMJKLMNWXYTUVJKLMNVWMNOKLMNOPQRD";
-    //   012345678901234567890123456789012345678901234567890123456789
-    //   0         1         2         3         4         5
+    //   012345678901234567890123456789012345678901234567890123456789012
+    //   0         1         2         3         4         5         6
+    return debug_in_window(__func__, s, 32);
+}
+
+static errno_t test_case_6(void) {
+    const char* s =
+        "VWXHQRSTUVWXGHIJKDEFDEFZLMCDHIHIHICDYQRSTUVWXGHFGHIJKFIJKBCQRST";
+    //   012345678901234567890123456789012345678901234567890123456789012
+    //   0         1         2         3         4         5         6
     return debug_in_window(__func__, s, 32);
 }
 
@@ -444,7 +480,7 @@ static errno_t test_permutations(void) {
         }
         d[countof(d) - 1] = 0;
         size_t n = strlen((const char*)d);
-        sqz_debug = j == 0;
+        sqz_debug = j == 3;
         if (sqz_debug) { dump_string_input((const char*)d); }
         r = compress_and_verify(__func__, d, n, 32, !sqz_debug);
     }
@@ -517,9 +553,13 @@ int main(int argc, const char* argv[]) {
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int),
             sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
-#if 0
+#if 1
     if (r == 0) { r = test_case_1(); }
     if (r == 0) { r = test_case_2(); }
+    if (r == 0) { r = test_case_3(); }
+    if (r == 0) { r = test_case_4(); }
+    if (r == 0) { r = test_case_5(); }
+    if (r == 0) { r = test_case_6(); }
     if (r == 0) { r = test_permutations(); }
     if (r == 0) { r = test_0_to_10(); }
     if (r == 0) { r = test_zeros(); }
@@ -533,24 +573,25 @@ int main(int argc, const char* argv[]) {
     if (r == 0) { r = test_files(); }
     if (r == 0) { r = test_corpus(); }
 #else
+//  if (r == 0) { r = test_0_to_10(); }
 //  if (r == 0) { r = test_case_1(); }
-    if (r == 0) { r = test_case_2(); }
-    if (r == 0) { r = test_case_3(); }
-    if (r == 0) { r = test_case_4(); }
-    if (r == 0) { r = test_case_5(); }
-    if (r == 0) { r = test_permutations(); }
-    if (r == 0) { r = test_0_to_10(); }
-    if (r == 0) { r = test_zeros(); }
-    if (r == 0) { r = test_rle(); }
-    if (r == 0) { r = test_hello(); }
-    if (r == 0) { r = test_short(); }
-    if (r == 0) { r = test_long(); }
-//  if (r == 0) { r = test_file(__FILE__); } // test.c source code:
-//  if (r == 0) { r = test_file("test/silesia.tar"); }
+//  if (r == 0) { r = test_case_2(); }
+//  if (r == 0) { r = test_case_3(); }
+//  if (r == 0) { r = test_case_4(); }
+//  if (r == 0) { r = test_case_5(); }
+//  if (r == 0) { r = test_case_6(); }
+//  if (r == 0) { r = test_permutations(); }
+//  if (r == 0) { r = test_zeros(); }
+//  if (r == 0) { r = test_rle(); }
+//  if (r == 0) { r = test_hello(); }
+//  if (r == 0) { r = test_short(); }
+//  if (r == 0) { r = test_long(); }
+    if (r == 0) { r = test_file(__FILE__); } // test.c source code:
     if (r == 0) { r = test_file("test/bible.txt"); }
-    if (r == 0) { r = test_file("test/arm64.elf"); }
-    if (r == 0) { r = test_file("test/hhgttg.txt"); }
-    if (r == 0) { r = test_file("test/corpus/mozilla.tar"); }
+//  if (r == 0) { r = test_file("test/arm64.elf"); }
+//  if (r == 0) { r = test_file("test/hhgttg.txt"); }
+//  if (r == 0) { r = test_file("test/corpus/mozilla.tar"); }
+//  if (r == 0) { r = test_file("test/silesia.tar"); }
 #endif
     return r;
 }
