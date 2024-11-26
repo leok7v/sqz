@@ -363,16 +363,17 @@ static errno_t test_long(void) {
             d[start + i] = 0x20 + (base + i) % (128 - 32);
         }
     }
+sqz_debug = true;
     return test(__func__, d, sizeof(d));
 }
 
-static errno_t debug_in_window(const char* s, size_t w) {
+static errno_t debug_in_window(const char* name, const char* s, uint32_t w) {
     size_t n = strlen(s);
     sqz_debug = true;
     dump_string_input(s);
     const uint8_t* d = (const uint8_t*)s;
     errno_t r = 0;
-    r = compress_and_verify(__func__, d, n, 32, !sqz_debug);
+    r = compress_and_verify(name, d, n, w, !sqz_debug);
     sqz_debug = false;
     return r;
 }
@@ -385,7 +386,7 @@ static errno_t test_case_1(void) { // good!
         "ABCD1,0,ABCD1+1+ABCD1+2_ABCD1_1_abcd1_4-ABCD1+5_1234";
     //   012345678901234567890123456789012345678901234567890123456789
     //   0         1         2         3         4         5
-    return debug_in_window(s, 32);
+    return debug_in_window(__func__, s, 32);
 }
 
 static errno_t test_case_2(void) { // good
@@ -393,7 +394,7 @@ static errno_t test_case_2(void) { // good
         "ABCD1,0,ABCD1+1+ABCD3+2_ABCD1_1_abcd1_4-ABCD1+5_1234";
     //   012345678901234567890123456789012345678901234567890123456789
     //   0         1         2         3         4         5
-    return debug_in_window(s, 32);
+    return debug_in_window(__func__, s, 32);
 }
 
 static errno_t test_case_3(void) { // good
@@ -401,7 +402,7 @@ static errno_t test_case_3(void) { // good
         "STUVWJKLMNOPQRRYZQRLMNNNNNSRSTUVWTUVWNOPQRNOPQRNOPQVWXBVWXYZDGH";
     //   012345678901234567890123456789012345678901234567890123456789
     //   0         1         2         3         4         5
-    return debug_in_window(s, 32);
+    return debug_in_window(__func__, s, 32);
 }
 
 static errno_t test_case_4(void) {
@@ -409,7 +410,7 @@ static errno_t test_case_4(void) {
         "HIJDEFGGGGGGGGGGGEFGHGGGGGGGGGGGIIJTUVWXYZCDECDECTCDECYZAABCDEF";
     //   012345678901234567890123456789012345678901234567890123456789
     //   0         1         2         3         4         5
-    return debug_in_window(s, 32);
+    return debug_in_window(__func__, s, 32);
 }
 
 static errno_t test_case_5(void) {
@@ -417,7 +418,7 @@ static errno_t test_case_5(void) {
         "FGHIJKLMNOTUVWXYZABCKXMXJKLMNOPLMJKLMNWXYTUVJKLMNVWMNOKLMNOPQRD";
     //   012345678901234567890123456789012345678901234567890123456789
     //   0         1         2         3         4         5
-    return debug_in_window(s, 32);
+    return debug_in_window(__func__, s, 32);
 }
 
 static errno_t test_permutations(void) {
@@ -443,7 +444,7 @@ static errno_t test_permutations(void) {
         }
         d[countof(d) - 1] = 0;
         size_t n = strlen((const char*)d);
-        sqz_debug = j == 589;
+        sqz_debug = j == 0;
         if (sqz_debug) { dump_string_input((const char*)d); }
         r = compress_and_verify(__func__, d, n, 32, !sqz_debug);
     }
@@ -533,23 +534,23 @@ int main(int argc, const char* argv[]) {
     if (r == 0) { r = test_corpus(); }
 #else
 //  if (r == 0) { r = test_case_1(); }
-//  if (r == 0) { r = test_case_2(); }
-//  if (r == 0) { r = test_case_3(); }
-//  if (r == 0) { r = test_case_4(); }
-//  if (r == 0) { r = test_case_5(); }
+    if (r == 0) { r = test_case_2(); }
+    if (r == 0) { r = test_case_3(); }
+    if (r == 0) { r = test_case_4(); }
+    if (r == 0) { r = test_case_5(); }
     if (r == 0) { r = test_permutations(); }
-//  if (r == 0) { r = test_0_to_10(); }
-//  if (r == 0) { r = test_zeros(); }
-//  if (r == 0) { r = test_rle(); }
-//  if (r == 0) { r = test_hello(); }
-//  if (r == 0) { r = test_short(); }
-//  if (r == 0) { r = test_long(); } // failing
+    if (r == 0) { r = test_0_to_10(); }
+    if (r == 0) { r = test_zeros(); }
+    if (r == 0) { r = test_rle(); }
+    if (r == 0) { r = test_hello(); }
+    if (r == 0) { r = test_short(); }
+    if (r == 0) { r = test_long(); }
 //  if (r == 0) { r = test_file(__FILE__); } // test.c source code:
 //  if (r == 0) { r = test_file("test/silesia.tar"); }
-//  if (r == 0) { r = test_file("test/bible.txt"); }
-//  if (r == 0) { r = test_file("test/arm64.elf"); }
-//  if (r == 0) { r = test_file("test/hhgttg.txt"); }
-//  if (r == 0) { r = test_file("test/corpus/mozilla.tar"); }
+    if (r == 0) { r = test_file("test/bible.txt"); }
+    if (r == 0) { r = test_file("test/arm64.elf"); }
+    if (r == 0) { r = test_file("test/hhgttg.txt"); }
+    if (r == 0) { r = test_file("test/corpus/mozilla.tar"); }
 #endif
     return r;
 }

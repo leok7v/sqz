@@ -259,7 +259,7 @@ static void io_write_fully(struct io* io, const char* fn) {
     swear(io->file == NULL && io->data != NULL);
     FILE* f = fopen(fn, "wb");
     if (f != NULL) {
-        size_t written = fwrite(&io->data, (size_t)io->written, 1, io->file);
+        size_t written = fwrite(&io->data, (size_t)io->written, 1, f);
         io->error = written == 1 ? 0 : errno;
         errno_t r = fclose(f) == 0 ? 0 : errno;
         if (io->error == 0) { io->error = r; }

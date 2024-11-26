@@ -52,6 +52,7 @@ struct map {
 
 struct tree {
     const uint8_t* p;
+    struct tree* pn; // parent
     struct tree* ld; // left descendant
     struct tree* rd; // right descendant
 };

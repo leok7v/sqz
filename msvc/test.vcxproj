@@ -366,7 +366,6 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <GeneratedebugInformation>true</GeneratedebugInformation>
     </Link>
     <PostBuildEvent>
       <Command>../scripts/download.bat</Command>

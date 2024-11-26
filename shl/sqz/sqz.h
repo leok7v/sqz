@@ -52,6 +52,7 @@ struct map {
 
 struct tree {
     const uint8_t* p;
+    struct tree* pn; // parent
     struct tree* ld; // left descendant
     struct tree* rd; // right descendant
 };
@@ -413,92 +414,105 @@ static void sqz_init_compress(struct sqz* s) {
     map_init(&s->map4, s->map4e, sizeof(s->map4e) / sizeof(s->map4e[0]), 4);
 }
 
-static inline size_t sqz_tree_index_of(const struct sqz* s,
-                                       const struct tree* node, size_t w) {
-    return (node - s->tree) % w;
+static void sqz_node_verify(const struct tree* node) {
+    if (node) {
+        if (!node->ld && !node->rd) {
+            // no descendants
+        } else {
+            assert(node->ld != node->rd);
+            if (node->ld) {
+                assert(node->ld->p < node->p);
+                assert(node->ld->pn == node);
+                assert(memcmp(node->ld->p, node->p, 4) == 0);
+                sqz_node_verify(node->ld);
+            }
+            if (node->rd) {
+                assert(node->rd->p < node->p);
+                assert(node->rd->pn == node);
+                assert(memcmp(node->rd->p, node->p, 4) == 0);
+                sqz_node_verify(node->rd);
+            }
+        }
+    }
 }
 
-static inline void sqz_tree_insert(struct sqz* s, const uint8_t* in, size_t i,
-                                   size_t w, const uint8_t* pp) {
-//sqz_debug = true;
-    const size_t index = i & (w - 1);
-    assert(s->tree[index].p == in + i); // already assigned by caller
-    assert(!s->tree[index].ld); // must be set to zero by caller
-    assert(!s->tree[index].rd); // must be set to zero by caller
-    assert(memcmp(pp, in + i, 4) == 0);
-    const size_t  p = pp - in;
-    const size_t  pix = p & (w - 1); // previous index
-    assert(pix != index);
-    const uint8_t bi = in[i + 4]; // byte at position `i` + 4
-    const uint8_t bp = in[p + 4]; // byte at position `p` + 4
-    const bool left = bp <= bi;
-    if (left) {
-        s->tree[index].ld = &s->tree[pix];
-        sqz_trace("[%2zu] s->left[%2zu] := %2zu \"%.5s\" \"%.5s\"\n",
-                  i, index, p, in + i, s->tree[index].ld->p);
-    } else {
-        s->tree[index].rd = &s->tree[pix];;
-        sqz_trace("[%2zu] s->right[%2zu] := %2zu \"%.5s\" \"%.5s\"\n",
-                  i, index, p, in + i, s->tree[index].rd->p);
+static inline size_t sqz_tree_index_of(const struct sqz* s,
+                                       const struct tree* nd, size_t w) {
+    return (nd - s->tree) % w;
+}
+
+static void print_node(struct sqz* s, size_t w, char kind,
+                       const struct tree* nd, size_t indent) {
+    if (nd) {
+        for (size_t i = 0; i < indent * 2; i++) { printf("%c", 0x20); }
+        printf("%c %zd \"%.16s\"\n", kind, sqz_tree_index_of(s, nd, w), nd->p);
+        if (nd->ld) { print_node(s, w, 'L', nd->ld, indent + 1); }
+        if (nd->rd) { print_node(s, w, 'R', nd->rd, indent + 1); }
     }
-if (s->tree[index].ld) { assert(s->tree[index].ld->p < s->tree[index].p); }
-if (s->tree[index].rd) { assert(s->tree[index].rd->p < s->tree[index].p); }
-    if (left && s->tree[pix].rd) {
-        struct tree* g = s->tree[pix].rd; // grandchild
-        assert(g != &s->tree[pix]); // no direct loop
-        // grandchild out of window:
-        if (!g->p || // out of window
-            g == &s->tree[index] || // loop
-            g->p >= s->tree[pix].p || // wrap around
-            g->p >= s->tree[index].ld->p ||
-            g->p >= s->tree[index].p) {
-            s->tree[pix].rd = 0;
+}
+
+static void print_tree(struct sqz* s, size_t w, const struct tree* nd) {
+    print_node(s, w, '+', nd, 0);
+    printf("\n");
+}
+
+static int tree_depth(const struct tree* nd) {
+    return !nd ? 0 : 1 + tree_depth(nd->ld) + tree_depth(nd->rd);
+}
+
+static void sqz_tree_remove(struct tree* node) {
+    if (node->pn) {
+        if (node->pn->ld == node) {
+            node->pn->ld = 0;
+        } else if (node->pn->rd == node) {
+            node->pn->rd = 0;
         } else {
-            assert(g != &s->tree[index] && g != &s->tree[pix]);
-            assert(memcmp(g->p, in + i, 4) == 0);
-assert(g->p < s->tree[index].ld->p);
-            uint8_t bg = g->p[4]; // byte 4 at grandchild
-            if (bg > bi) {
-                assert(!s->tree[index].rd && g);
-                s->tree[index].rd = g;
-                s->tree[pix].rd = 0;
-                sqz_trace("right grandchild moved up\n");
-if (s->tree[index].ld) { assert(s->tree[index].ld->p < s->tree[index].p); }
-if (s->tree[index].rd) { assert(s->tree[index].rd->p < s->tree[index].p); }
-            }
-        }
-    } else if (!left && s->tree[pix].ld) {
-        struct tree* g = s->tree[pix].ld; // grandchild
-        assert(g != &s->tree[pix]); // no direct loop
-        if (!g->p || // out of window
-            g == &s->tree[index] || // loop
-            g->p >= s->tree[pix].p || // wrap around
-            g->p >= s->tree[index].rd->p ||
-            g->p >= s->tree[index].p) {
-            s->tree[pix].ld = 0;
-        } else {
-            assert(g != &s->tree[index] && g != &s->tree[pix]);
-            assert(memcmp(g->p, in + i, 4) == 0);
-sqz_trace("[%2zu] s->tree[%2zu].ld:%2zu.p:%2zu \"%.5s\"\n",
-            i, pix, sqz_tree_index_of(s, g, w), g->p - in, g->p);
-assert(g->p < s->tree[index].rd->p);
-            uint8_t bg = g->p[4]; // byte at position `p` + 4
-            if (bg <= bi) {
-                assert(!s->tree[index].ld && g);
-                s->tree[index].ld = g;
-                s->tree[pix].ld = 0;
-                sqz_trace("left  grandchild moved up\n");
-if (s->tree[index].ld) { assert(s->tree[index].ld->p < s->tree[index].p); }
-if (s->tree[index].rd) { assert(s->tree[index].rd->p < s->tree[index].p); }
-            }
+            assert(false); // bad tree
         }
     }
-    sqz_trace("[%2zu] inserted %2zu \"%.5s\" left: %2zd right: %2zd\n", i,
-        s->tree[index].p - in, s->tree[index].p,
-        s->tree[index].ld && s->tree[index].ld->p ? s->tree[index].ld->p - in : -1,
-        s->tree[index].rd && s->tree[index].rd->p ? s->tree[index].rd->p - in : -1);
-    if (s->tree[index].ld) { assert(s->tree[index].ld->p < s->tree[index].p); }
-    if (s->tree[index].rd) { assert(s->tree[index].rd->p < s->tree[index].p); }
+    node->p = 0; // TODO: not necessary
+    node->pn = 0;
+    node->ld = 0;
+    node->rd = 0;
+}
+
+static void sqz_tree_rebalance(struct tree* nd, size_t max_len) {
+    assert(4 <= max_len && max_len <= sqz_max_len);
+    sqz_node_verify(nd);
+    if (nd->ld && !nd->rd && nd->ld->rd) {
+        struct tree* lc = nd->ld; // left child
+        struct tree* rg = lc->rd; // right grandchild
+// TODO: for equal values the higher ->p value preferred
+        if (memcmp(nd->p, rg->p, max_len) <= 0) {
+            nd->rd = rg;
+            lc->rd = 0;
+            rg->pn = nd;
+        }
+        sqz_tree_rebalance(lc, max_len);
+    } else if (nd->rd && !nd->ld && nd->rd->ld) {
+        struct tree* rc = nd->rd; // right child
+        struct tree* lg = rc->ld; // left grandchild
+// TODO: for equal values the higher ->p value preferred
+        if (memcmp(lg->p, rc->p, max_len) > 0) {
+            nd->ld = lg;
+            rc->ld = 0;
+            lg->pn = nd;
+        }
+        sqz_tree_rebalance(rc, max_len);
+    }
+    sqz_node_verify(nd);
+}
+
+static inline void sqz_tree_insert(struct sqz* s, size_t i, const size_t n,
+                                   size_t w, size_t p) {
+    struct tree* nd = &s->tree[i & (w - 1)];
+    struct tree* pr = &s->tree[p & (w - 1)];
+    size_t max_len = n - i + 4 > sqz_max_len ? sqz_max_len : n - i + 4;
+    if (memcmp(nd->p, pr->p, max_len) <= 0) { nd->ld = pr; } else { nd->rd = pr; }
+    pr->pn = nd;
+//  print_tree(s, w, nd);
+    sqz_tree_rebalance(nd, max_len);
+//  print_tree(s, w, nd);
 }
 
 static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
@@ -524,84 +538,82 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
         b = map_put3(&s->map3, in + i, b4 & 0x00FFFFFFu);
         assert(b);
         const size_t index = i % w;
+        sqz_tree_remove(&s->tree[index]);
         s->tree[index].p = in + i;
-        s->tree[index].ld = 0;
-        s->tree[index].rd = 0;
-        sqz_trace("[%2zu] tree[%2zu].p := %2zu \"%.5s\"\n", i, index, i, in + i);
         size_t ix;
         bool seen = map_get4(&s->map4, b4, &ix);
         if (!seen) {
-            b = map_put4(&s->map4, in + i, b4); // TODO: result of this put can be reused in next find() instead if calling map_get4()
+            // TODO: can result of this map_put be reused in next
+            // find() instead if calling map_get4()?
+            b = map_put4(&s->map4, in + i, b4);
             assert(b);
             s->prev[index] = 0;
-//          sqz_trace("[%2zu] prev[%2zu] := 0\n", i, index);
-            // >debug:
-            assert(map_get4(&s->map4, b4, &ix));
-            assert(s->map4.p[ix] == in + i);
-            // <debug
         } else {
             // previous position of 4 bytes entry of 'pm' previous match:
             const uint8_t* pm = (const uint8_t*)s->map4.p[ix];
-            assert(memcmp(pm, in + i, 4) == 0);
-            size_t pp = pm - in;
-            s->map4.p[ix] = in + i; // overwrite with shortest distance same 4 bytes
+            // overwrite with shorter distance for the same 4 bytes:
+            s->map4.p[ix] = in + i;
             if (pm + w >= in + i) { // inside window: pm >= in + i - w
+                size_t pp = pm - in;
                 s->prev[index] = i - pp;
-//              sqz_trace("[%2zu] prev[%2zu] := %2zu \"%.5s\"\n", i, index, i - pp, pm);
-                assert(memcmp(pm, in + i, 4) == 0);
-                sqz_tree_insert(s, in, i, w, pm);
+                sqz_tree_insert(s, i, n, w, pp);
             } else {
                 s->prev[index] = 0;
-//              sqz_trace("[%2zu] prev[%2zu] := 0\n", i, index);
             }
         }
-        s->map2[ b4 & 0xFFFFu] = i + 1;
+        s->map2[b4 & 0xFFFFu] = i + 1;
     }
 }
 
+static uint64_t prev_sum;
+static uint64_t prev_count;
+static size_t   prev_max;
+static int      tree_max_depth;
+static int      tree_max_search;
+static uint64_t tree_search_sum;
+static int      tree_search;
+
+static uint64_t sqz_debug_ix = UINT64_MAX;
+// static uint64_t sqz_debug_ix = 40;
+
 static inline void sqz_tree_find(struct sqz* s,
                                  const uint8_t* in, size_t i, size_t n,
-                                 size_t w, size_t p, size_t *ml, size_t *md) {
-    size_t len = 4;
-    size_t dst = i - p;
-    const size_t max_k = n - i > sqz_max_len ? sqz_max_len : n - i;
-    size_t pix = p & (w - 1); // previous index
-struct tree* last = 0;
-struct tree* prev = 0;
-    struct tree* node = &s->tree[pix];
-    while (node->p) {
-        sqz_trace("[%2zu] p: %2zu \"%.*s\" \"%.*s\" len: %2zu\n",
-                    i, p, (int)len + 1, in + i, (int)len + 1, in + p, len);
-        assert(memcmp(node->p, in + i, len) == 0);
-        size_t k = len; // because with `len` bytes are the same
-        while (k < max_k && node->p[k] == in[i + k]) { k++; }
-        if (k > len) {
-            len = k;
-            dst = i - (node->p - in);
-            sqz_trace("[%2zu] p: %2zu \"%.*s\" \"%.*s\" len: %zu, dst: %zu\n",
-                        i, p, (int)len + 1, in + i, (int)len + 1, in + p, len, dst);
-            if (len == sqz_max_len) { break; }
+                                 size_t w, const struct tree* nd,
+                                 size_t *ml, size_t *md) {
+    tree_search++;
+    size_t len = *ml;
+    size_t dst = *md;
+    const size_t max_len = n - i > sqz_max_len ? sqz_max_len : n - i;
+    assert(len < max_len);
+    size_t k = 4; // because with 4 bytes are the same
+    while (k < max_len && nd->p[k] == in[i + k]) { k++; }
+    if (k > len || k == len && i - (nd->p - in) < dst) {
+        len = k;
+        dst = i - (nd->p - in);
+//      if (sqz_debug_ix == i) {
+            sqz_trace("[%2zu] p: %2zu \"%.*s\" \"%.*s\" len: %2zu dst: %2zu\n",
+                        i, sqz_tree_index_of(s, nd, w),
+                        (int)len, in + i, (int)len, nd->p, len, dst);
+//      }
+    }
+    if (len < max_len) {
+        size_t ld_len = len;
+        size_t ld_dst = dst;
+        if (nd->ld) {
+            sqz_tree_find(s, in, i, n, w, nd->ld, &ld_len, &ld_dst);
         }
-        const uint8_t bi = in[i + 4];  // byte at position `i` + 4
-        const uint8_t bp = node->p[4]; // byte at position `c` + 4
-        if (bi <= bp) {
-            node = s->tree[pix].ld;
-        } else {
-            node = s->tree[pix].rd;
+        size_t rd_len = len;
+        size_t rd_dst = dst;
+        if (nd->rd) {
+            sqz_tree_find(s, in, i, n, w, nd->rd, &rd_len, &rd_dst);
         }
-        if (!node) { break; }
-assert(node != last);
-assert(node != prev, "node:last:prev: %2zd:%2zd:%2zd\n",
-                     sqz_tree_index_of(s, node, w),
-                     sqz_tree_index_of(s, last, w),
-                     sqz_tree_index_of(s, prev, w));
-prev = last;
-last = node;
-        if (node->p) {
-            p = node->p - in;
-            if (p + w < i) { break; } // unsigned of: p < i - w
-            if (memcmp(node->p, in + i, len) != 0) { break; }
-            pix = p & (w - 1);
+        if (rd_len > len || rd_len == len && rd_dst < dst) {
+            len = rd_len;
+            dst = rd_dst;
+        }
+        if (ld_len > len || ld_len == len && ld_dst < dst) {
+            len = ld_len;
+            dst = ld_dst;
         }
     }
     if (len > 0) {
@@ -613,10 +625,6 @@ last = node;
 // lz_find() function finds longest match at a shortest distance and returns
 // ml: [2..max_len] inclusive
 // md: [1..window] inclusive
-
-static uint64_t prev_sum;
-static uint64_t prev_count;
-static size_t   prev_max;
 
 static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
                             const size_t w, const size_t i,
@@ -634,11 +642,22 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     size_t tl = 0;
     size_t td = 0;
     if (b) {
-        sqz_trace("found\n");
-//      if (sqz_debug && i == 54) { rt_breakpoint(); }
-
+        if (sqz_debug_ix == i) {
+            sqz_trace("[%2zd] found in: \"%.5s\" map4: \"%.5s\"\n", i, in + i, s->map4.p[ix]);
+        }
         size_t p = (const uint8_t*)s->map4.p[ix] - in;
-        sqz_tree_find(s, in, i, n, w, p, &tl, &td);
+        tl = 4;
+        td = i - p;
+        if (sqz_debug_ix == i) {
+            print_tree(s, w, &s->tree[p & (w - 1)]);
+            rt_breakpoint();
+        }
+        int depth = tree_depth(&s->tree[p & (w - 1)]);
+        if (depth > tree_max_depth) { tree_max_depth = depth; }
+        tree_search = 0;
+        sqz_tree_find(s, in, i, n, w, &s->tree[p & (w - 1)], &tl, &td);
+        tree_search_sum += tree_search;
+        if (tree_search > tree_max_search) { tree_max_search = tree_search; }
         const size_t max_k = n - i > sqz_max_len ? sqz_max_len : n - i;
         len = 4;
         dst = i - p;
@@ -646,27 +665,32 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
         // on "silesia.tar" is ~154 upto ~430 on test_long (random)
         size_t prev_chain = 0;
         for (;;) {
-            sqz_trace("[%2zu] p: %2zu \"%.*s\" \"%.*s\" len: %2zu\n",
-                      i, p, (int)len + 1, in + i, (int)len + 1, in + p, len);
-            assert(memcmp(in + p, in + i, len) == 0);
-            size_t k = len; // because with `len` bytes are the same
+            assert(memcmp(&b4, in + p, 4) == 0);
+//          if (sqz_debug_ix == i) {
+                sqz_trace("[%2zu] p: %2zu \"%.*s\" \"%.*s\" len: %2zu ",
+                          i, p, (int)len + 1, in + i, (int)len + 1, in + p, len);
+//          }
+            size_t k = 4; // because with 4 bytes are the same
             while (k < max_k && in[p + k] == in[i + k]) { k++; }
             if (k > len) {
                 len = k;
                 dst = i - p;
-                sqz_trace("[%2zu] p: %2zu \"%.*s\" \"%.*s\" len: %zu, dst: %zu\n",
-                          i, p, (int)len + 1, in + i, (int)len + 1, in + p, len, dst);
+//              if (sqz_debug_ix == i) {
+                    sqz_trace("len: %zu, dst: %zu \"%.*s\"\n", len, dst, (int)len, in + i);
+//              }
                 if (len == sqz_max_len) { break; }
+            } else {
+//              if (sqz_debug_ix == i) {
+                    sqz_trace("\n");
+//              }
             }
-            size_t index = p & (w - 1); // same as p % w for w = 2^x
-            size_t d = s->prev[index];
+            size_t d = s->prev[p & (w - 1)];
             if (d == 0) { break; }
             p -= d;
             // p < i - w won't work because unsigned i - w for i < w
             if (p + w < i) { break; } // unsigned version of: p < i - w
             prev_chain++;
-            assert(memcmp(in + p, in + i, 4) == 0);
-            if (memcmp(in + p, in + i, len) != 0) { break; }
+            if (memcmp(in + p, in + i, 4) != 0) { break; } // overwritten
         }
         if (prev_chain > 0) {
             prev_sum += prev_chain;
@@ -674,10 +698,12 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
             if (prev_chain > prev_max) { prev_max = prev_chain; }
         }
         if (len >= 4 || tl >= 4) {
-            // tree search works better because children move up
+            // tree search may work better because children moved up
+            assert(tl == len);
+            assert(td == dst);
             assert(tl >= len);
             if (tl == len) {
-                assert(td == dst);
+                assert(td <= dst);
             } else {
                 assert(0 < td && td <= w);
             }
@@ -738,6 +764,10 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
 prev_sum = 0;
 prev_max = 0;
 prev_count = 0;
+tree_max_depth = 0;
+tree_max_search = 0;
+tree_search_sum = 0;
+sqz_debug = sqz_debug_ix < UINT64_MAX;
     sqz_init_compress(s);
     uint8_t  delta   = 5; // >= 7 use XOR delta predictor
     size_t   after   = 0; // index of first byte after last match
@@ -829,7 +859,11 @@ prev_count = 0;
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
     if (prev_count > 0) {
-        printf("prev[] simple avg: %.1f max: %2zu\n", (double)prev_sum / prev_count, prev_max);
+        printf("prev[] simple avg: %.1f max: %2zu \n"
+               "tree max depth: %d search: %d avg: %.1f\n",
+               (double)prev_sum / prev_count, prev_max,
+                tree_max_depth, tree_max_search,
+                (double)tree_search_sum / prev_count);
     }
 }
 
