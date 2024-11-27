@@ -348,16 +348,14 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
                     s->prev[index] = 0;
                 } else {
                     const uint8_t* mp = (const uint8_t*)m->p[ix];
-//                  assert(memcmp(mp, in + i, 8) == 0);
                     // previous position of 8 bytes entry of 'pm' previous match:
                     // overwrite with shorter distance for the same 8 bytes:
                     m->p[ix] = in + i;
-                    if (mp + w >= in + i) { // inside window: pm >= in + i - w
-                        size_t pp = mp - in;
-                        s->prev[index] = i - pp;
-                    } else {
-                        s->prev[index] = 0;
-                    }
+                    // the previous map entry is already removed
+                    // if it is outside the window
+                    assert(mp + w >= in + i); // inside window: pm >= in + i - w
+                    size_t pp = mp - in;
+                    s->prev[index] = i - pp;
                 }
             }
         }
@@ -438,7 +436,6 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
                 // on "silesia.tar" is ~154 upto ~430 on test_long (random)
                 size_t prev_chain = 0;
                 for (;;) {
-                    assert(memcmp(&i64, mp, 8) == 0); // TODO: paranoia remove
                     if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
                         size_t ln = len + 1;
                         if (ln > 16) { ln = 16; }
@@ -465,17 +462,11 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
                     // p < i - w won't work because unsigned i - w for i < w
                     if (p + w < i) { break; } // unsigned version of: p < i - w
                     prev_chain++;
-//                  if (memcmp(in + p, in + i, 8) != 0) {
-//                      assert(false); // TODO: is it ever overwritten?
-//                      break;
-//                  }
                 }
                 if (prev_chain > 0) {
                     prev_sum += prev_chain;
                     prev_count++;
-                    if (prev_chain > prev_max) { prev_max = prev_chain;
-//                      if (prev_max == 20554) { rt_breakpoint(); }
-                    }
+                    if (prev_chain > prev_max) { prev_max = prev_chain; }
                 }
             }
         } else if (len == 0) {
@@ -596,44 +587,6 @@ static void freq3(struct sqz* s, size_t n) {
     }
 }
 
-/*
-static inline void repack_last_dist(uint64_t *last_dist, int rep) {
-    if (rep > 0) {
-        union { uint64_t ui64; uint16_t ui16[4]; } ld = { .ui64 = *last_dist };
-        switch (rep) {
-            case 1: *last_dist = ld.ui16[1] | ((uint64_t)ld.ui16[0] << 16) | ((uint64_t)ld.ui16[2] << 32) | ((uint64_t)ld.ui16[3] << 48);
-                    break;
-            case 2: *last_dist = ld.ui16[2] | ((uint64_t)ld.ui16[0] << 16) | ((uint64_t)ld.ui16[1] << 32) | ((uint64_t)ld.ui16[3] << 48);
-                    break;
-            case 3: *last_dist = ld.ui16[3] | ((uint64_t)ld.ui16[0] << 16) | ((uint64_t)ld.ui16[1] << 32) | ((uint64_t)ld.ui16[2] << 48);
-                    break;
-            default: assert(false);
-        }
-    }
-}
-*/
-
-#if 0
-
-compress     211,087,360 -> 69,661,519   33.00% bps: 2.6 of "silesia.tar"
-
-#define repack_last_dist(ld, r) do {                                        \
-    if ((r) > 0) {                                                          \
-        const uint64_t top = ((ld) >> ((r) * 16)) & 0xFFFFuLL;              \
-        const uint64_t rest = ((ld) & ~(0xFFFFuLL << ((r) * 16))) |         \
-                        (((ld) & ((1uLL << ((r) * 16)) - 1)) << 16);        \
-        (ld) = (rest & ~(0xFFFFuLL << 16)) | top;                           \
-    }                                                                       \
-} while (0)
-
-#else
-
-// 211,087,360 -> 69,577,759   32.96% bps: 2.6 of "silesia.tar"
-
-#define repack_last_dist(ld, r)
-
-#endif
-
 void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (n > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
@@ -699,7 +652,6 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
                 if (rep >= 0) {
                     rc_encode(&s->rc, &s->pm_rep, (uint8_t)rep);
                     delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
-                    repack_last_dist(last_dist, rep);
                 } else if (len == 2) {
                     assert(dst <= UINT8_MAX);
                     rc_encode(&s->rc, &s->pm_dist, (uint8_t)dst);
@@ -716,7 +668,6 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
                 if (rep >= 0) {
                     rc_encode(&s->rc, &s->pm_rep, (uint8_t)rep);
                     delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
-                    repack_last_dist(last_dist, rep);
                 } else {
                     assert(dst <= UINT16_MAX);
                     rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dst & 0xFF));
@@ -786,7 +737,6 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
                     uint8_t rep = rc_decode(&s->rc, &s->pm_rep);
                     dist = (uint32_t)(last_dist >> (rep * 16)) & 0xFFFF;
                     delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
-                    repack_last_dist(last_dist, rep);
                 } else {
                     dist = rc_decode(&s->rc, &s->pm_dist);
                     delta = sqz_match[delta];
@@ -800,7 +750,6 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
                     uint8_t rep = rc_decode(&s->rc, &s->pm_rep);
                     dist = (uint32_t)(last_dist >> (rep * 16)) & 0xFFFF;
                     delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
-                    repack_last_dist(last_dist, rep);
                 } else {
                     dist  = rc_decode(&s->rc, &s->pm_lsb); // See Note 1
                     dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);

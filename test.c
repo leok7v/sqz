@@ -516,6 +516,20 @@ static errno_t test_permutations(void) {
     return r;
 }
 
+static errno_t test_16_repeats(void) {
+    uint8_t d[65] = {0};
+    const char* s = "0000000000000000"; // 16 bytes
+    memcpy(d +  0, s, 16);
+    memcpy(d + 16, s, 16);
+    memcpy(d + 32, s, 16);
+    memcpy(d + 48, s, 16);
+    // last byte different
+    d[15] = 'X';
+    d[31] = 'Y';
+    d[48] = 'Z';
+    return test(__func__, d, sizeof(d));
+}
+
 static errno_t test_files(void) {
     static const char* files[] = {
         "test/bible.txt",
@@ -596,6 +610,7 @@ int main(int argc, const char* argv[]) {
     if (r == 0) { r = test_hello(); }
     if (r == 0) { r = test_short(); }
     if (r == 0) { r = test_long(); }
+    if (r == 0) { r = test_16_repeats(); }
     if (r == 0) { r = test_file(__FILE__); } // test.c source code:
     // argv[0] executable filepath (Windows) or possibly name (Unix)
     if (r == 0) { r = test_file(argv[0]); }
@@ -615,12 +630,13 @@ int main(int argc, const char* argv[]) {
 //  if (r == 0) { r = test_hello(); }
 //  if (r == 0) { r = test_short(); }
 //  if (r == 0) { r = test_long(); }
+    if (r == 0) { r = test_16_repeats(); }
 //  if (r == 0) { r = test_file(__FILE__); } // test.c source code:
 //  if (r == 0) { r = test_file("test/bible.txt"); }
 //  if (r == 0) { r = test_file("test/hhgttg.txt"); }
 //  if (r == 0) { r = test_file("test/arm64.elf"); }
 //  if (r == 0) { r = test_file("test/corpus/mozilla.tar"); }
-    if (r == 0) { r = test_file("test/silesia.tar"); }
+//  if (r == 0) { r = test_file("test/silesia.tar"); }
 #endif
     return r;
 }
