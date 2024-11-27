@@ -12,6 +12,7 @@
 
 // rt_assert(bool, printf_format, ...) extended form is supported.
 
+#include <inttypes.h>
 #include <locale.h>
 #include <math.h>
 #include <stdarg.h>
