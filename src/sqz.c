@@ -268,19 +268,23 @@ static inline uint8_t rc_decode(struct range_coder* rc, struct prob_model* pm) {
 
 void sqz_init(struct sqz* s) {
     rc_init(&s->rc, 0);
-    pm_init(&s->pm_bit0,  2);
+    pm_init(&s->pm_bit0,    2);
     pm_init(&s->pm_byte,  256);
-    pm_init(&s->pm_tag, 8);
+    pm_init(&s->pm_tag,    16);
     pm_init(&s->pm_dist,  sqz_max_len2_dist + 1);
-    pm_init(&s->pm_rep,   4);
+    pm_init(&s->pm_rep,     4);
+    pm_init(&s->pm_lix,    16);
+    pm_init(&s->pm_dix,    16);
     pm_init(&s->pm_len,   256);
     pm_init(&s->pm_lsb,   256);
     pm_init(&s->pm_msb,   256);
 }
 
 static void sqz_init_compress(struct sqz* s) {
-    memset(s->prev, 0, sizeof(s->prev));
-    memset(s->map2, 0, sizeof(s->map2));
+    memset(s->prev,   0, sizeof(s->prev));
+    memset(s->map2,   0, sizeof(s->map2));
+    memset(s->freq2,  0, sizeof(s->freq2));
+    memset(s->freq3,  0, sizeof(s->freq3));
     for (size_t j = 0; j < countof(s->maps); j++) {
         map_init(&s->maps[j], s->map_e[j], countof(s->map_e[j]), j + 3);
     }
@@ -408,8 +412,7 @@ static void lz_linear(const uint8_t* in, const size_t n,
 // md: [1..window] inclusive
 
 static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
-                            const size_t w, const size_t i,
-                            uint64_t incoming,
+                            const size_t w, const size_t i, uint64_t incoming,
                             size_t *ml, size_t *md) {
     assert(sqz_min_window <= w && w <= sqz_max_window);
     assert(((w - 1) & w) == 0); // window is power of 2
@@ -462,15 +465,17 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
                     // p < i - w won't work because unsigned i - w for i < w
                     if (p + w < i) { break; } // unsigned version of: p < i - w
                     prev_chain++;
-                    if (memcmp(in + p, in + i, 8) != 0) {
-                        assert(false); // TODO: is it ever overwritten?
-                        break;
-                    }
+//                  if (memcmp(in + p, in + i, 8) != 0) {
+//                      assert(false); // TODO: is it ever overwritten?
+//                      break;
+//                  }
                 }
                 if (prev_chain > 0) {
                     prev_sum += prev_chain;
                     prev_count++;
-                    if (prev_chain > prev_max) { prev_max = prev_chain; }
+                    if (prev_chain > prev_max) { prev_max = prev_chain;
+//                      if (prev_max == 20554) { rt_breakpoint(); }
+                    }
                 }
             }
         } else if (len == 0) {
@@ -486,14 +491,20 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
                 }
             }
         }
+
+        if (j == 3 && len == 3) {
+            s->freq3[incoming & 0xFFFFFFu]++;
+        }
+
     }
     if (len == 0) {
-        size_t p = s->map2[incoming & 0xFFFF];
+        size_t p = s->map2[incoming & 0xFFFFu];
         if (p > 0) {
             p--; // because map2[] keep position + 1
             if (i - p <= w) {
                 len = 2;
                 dst = i - p;
+                s->freq2[incoming & 0xFFFFu]++;
             }
         }
     }
@@ -529,6 +540,100 @@ static const uint8_t sqz_match[12] = {7, 7, 7, 7, 7, 7, 7, 10, 10, 10, 10, 10};
 static const uint8_t sqz_rep[12]   = {8, 8, 8, 8, 8, 8, 8, 11, 11, 11, 11, 11};
 static const uint8_t sqz_short[12] = {9, 9, 9, 9, 9, 9, 9, 11, 11, 11, 11, 11};
 
+
+struct freq_entry {
+    size_t index;
+    uint64_t freq;
+};
+
+static int compare_freq(const void* a, const void* b) {
+    const struct freq_entry* fa = (const struct freq_entry*)a;
+    const struct freq_entry* fb = (const struct freq_entry*)b;
+    if (fa->freq < fb->freq) return 1;
+    if (fa->freq > fb->freq) return -1;
+    return 0;
+}
+
+static void freq2(struct sqz* s, size_t n) {
+    static struct freq_entry sorted[countof(s->freq2)];
+    size_t sorted_count = 0;
+    uint64_t total = 0;
+    uint64_t cumulative = 0;
+    for (size_t i = 0; i < countof(s->freq2); i++) {
+        if (s->freq2[i] > 0) {
+            total += s->freq2[i];
+            sorted[sorted_count++] = (struct freq_entry){ .index = i, .freq = s->freq2[i] };
+        }
+    }
+    printf("FREQ2: %5.2f%% of %zd non-zero: %zd\n", 100.0 * 2 * total / n, n, sorted_count);
+    qsort(sorted, sorted_count, sizeof(struct freq_entry), compare_freq);
+    for (size_t i = 0; i < sorted_count && i < 16; i++) {
+        cumulative += sorted[i].freq;
+        printf("0x%04X, %10lld %5.2f%% %5.2f%%\n",
+               sorted[i].index, sorted[i].freq,
+               100.0 * 2 * sorted[i].freq / total, 100.0 * 2 * cumulative / n);
+    }
+}
+
+static void freq3(struct sqz* s, size_t n) {
+    static struct freq_entry sorted[countof(s->freq3)];
+    size_t sorted_count = 0;
+    uint64_t total = 0;
+    for (size_t i = 0; i < countof(s->freq3); i++) {
+        if (s->freq3[i] > 0) {
+            total += s->freq3[i];
+            sorted[sorted_count++] = (struct freq_entry){ .index = i, .freq = s->freq3[i] };
+        }
+    }
+    printf("FREQ3 %5.2f%% of %zd non-zero: %zd\n", 100.0 * 3 * total / n, n, sorted_count);
+    qsort(sorted, sorted_count, sizeof(struct freq_entry), compare_freq);
+    uint64_t cumulative = 0;
+    for (size_t i = 0; i < sorted_count && i < 16; i++) {
+        cumulative += sorted[i].freq;
+        printf("0x%06X, %10lld %5.2f%% %5.2f%%\n",
+               sorted[i].index, sorted[i].freq,
+               100.0 * 3 * sorted[i].freq / n, 100.0 * 3 * cumulative / n);
+    }
+}
+
+/*
+static inline void repack_last_dist(uint64_t *last_dist, int rep) {
+    if (rep > 0) {
+        union { uint64_t ui64; uint16_t ui16[4]; } ld = { .ui64 = *last_dist };
+        switch (rep) {
+            case 1: *last_dist = ld.ui16[1] | ((uint64_t)ld.ui16[0] << 16) | ((uint64_t)ld.ui16[2] << 32) | ((uint64_t)ld.ui16[3] << 48);
+                    break;
+            case 2: *last_dist = ld.ui16[2] | ((uint64_t)ld.ui16[0] << 16) | ((uint64_t)ld.ui16[1] << 32) | ((uint64_t)ld.ui16[3] << 48);
+                    break;
+            case 3: *last_dist = ld.ui16[3] | ((uint64_t)ld.ui16[0] << 16) | ((uint64_t)ld.ui16[1] << 32) | ((uint64_t)ld.ui16[2] << 48);
+                    break;
+            default: assert(false);
+        }
+    }
+}
+*/
+
+#if 0
+
+compress     211,087,360 -> 69,661,519   33.00% bps: 2.6 of "silesia.tar"
+
+#define repack_last_dist(ld, r) do {                                        \
+    if ((r) > 0) {                                                          \
+        const uint64_t top = ((ld) >> ((r) * 16)) & 0xFFFFuLL;              \
+        const uint64_t rest = ((ld) & ~(0xFFFFuLL << ((r) * 16))) |         \
+                        (((ld) & ((1uLL << ((r) * 16)) - 1)) << 16);        \
+        (ld) = (rest & ~(0xFFFFuLL << 16)) | top;                           \
+    }                                                                       \
+} while (0)
+
+#else
+
+// 211,087,360 -> 69,577,759   32.96% bps: 2.6 of "silesia.tar"
+
+#define repack_last_dist(ld, r)
+
+#endif
+
 void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (n > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
@@ -543,7 +648,7 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
     sqz_init_compress(s);
     uint8_t  delta   = 5; // >= 7 use XOR delta predictor
     size_t   after   = 0; // index of first byte after last match
-    uint64_t last_dist[256] = {0};
+    uint64_t last_dist = 0;
     const uint8_t* in = (const uint8_t*)memory;
     assert(sqz_min_window <= w && w <= sqz_max_window);
     if (n > 0) {
@@ -572,12 +677,10 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
         #endif
         int rep = -1;
         if (len > 0) {
-            // TODO: compare last_dist[len] vs last_dist without len
-            const uint64_t last = last_dist[len];
-            if (dst - 1 == ((last >>  0) & 0xFFFF)) { rep = 0; }
-            if (dst - 1 == ((last >> 16) & 0xFFFF)) { rep = 1; }
-            if (dst - 1 == ((last >> 32) & 0xFFFF)) { rep = 2; }
-            if (dst - 1 == ((last >> 48) & 0xFFFF)) { rep = 3; }
+            if (dst - 1 == ((last_dist >>  0) & 0xFFFF)) { rep = 0; }
+            if (dst - 1 == ((last_dist >> 16) & 0xFFFF)) { rep = 1; }
+            if (dst - 1 == ((last_dist >> 32) & 0xFFFF)) { rep = 2; }
+            if (dst - 1 == ((last_dist >> 48) & 0xFFFF)) { rep = 3; }
         }
         const uint8_t too_far = len == 2 && rep < 0 && dst > sqz_max_len2_dist;
         const uint8_t literal = len == 0 || too_far;
@@ -596,6 +699,7 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
                 if (rep >= 0) {
                     rc_encode(&s->rc, &s->pm_rep, (uint8_t)rep);
                     delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
+                    repack_last_dist(last_dist, rep);
                 } else if (len == 2) {
                     assert(dst <= UINT8_MAX);
                     rc_encode(&s->rc, &s->pm_dist, (uint8_t)dst);
@@ -612,6 +716,7 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
                 if (rep >= 0) {
                     rc_encode(&s->rc, &s->pm_rep, (uint8_t)rep);
                     delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
+                    repack_last_dist(last_dist, rep);
                 } else {
                     assert(dst <= UINT16_MAX);
                     rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dst & 0xFF));
@@ -619,8 +724,8 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
                     delta = sqz_match[delta];
                 }
             }
-            last_dist[len] <<= 16;
-            last_dist[len]  |= (uint16_t)dst;
+            last_dist <<= 16;
+            last_dist |= (uint16_t)dst;
             if (rep >= 0) {
                 // TODO: bring rep to the front of the queue
             }
@@ -645,6 +750,8 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
         printf("prev[] simple avg: %.1f max: %2zu\n",
                (double)prev_sum / prev_count, prev_max);
     }
+    freq2(s, n);
+    freq3(s, n);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
@@ -654,7 +761,7 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
     }
     uint8_t  delta   = 5; // >= 7 use XOR delta predictor
     size_t   after   = 0; // index of first byte after last match
-    uint64_t last_dist[256] = {0};
+    uint64_t last_dist = 0;
     uint8_t* d = (uint8_t*)data;
     size_t i = 0;
     while (s->rc.error == 0) {
@@ -663,7 +770,7 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
         if (literal) {
             if (i < n) {
                 uint8_t c = rc_decode(&s->rc, &s->pm_byte);
-                // TODO: dump XOR rsults and eyeball them in respect of the input arguments
+                // TODO: dump XOR results and eyeball them in respect of the input arguments
                 if (delta >= 7 && after) { c ^= d[after]; after = 0; }
                 d[i++] = c;
                 delta = sqz_lit[delta];
@@ -677,8 +784,9 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
             if (len == 2) {
                 if (tag & 1) {
                     uint8_t rep = rc_decode(&s->rc, &s->pm_rep);
-                    dist = (uint32_t)(last_dist[len] >> (rep * 16)) & 0xFFFF;
+                    dist = (uint32_t)(last_dist >> (rep * 16)) & 0xFFFF;
                     delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
+                    repack_last_dist(last_dist, rep);
                 } else {
                     dist = rc_decode(&s->rc, &s->pm_dist);
                     delta = sqz_match[delta];
@@ -690,8 +798,9 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
                 }
                 if (tag & 1) {
                     uint8_t rep = rc_decode(&s->rc, &s->pm_rep);
-                    dist = (uint32_t)(last_dist[len] >> (rep * 16)) & 0xFFFF;
+                    dist = (uint32_t)(last_dist >> (rep * 16)) & 0xFFFF;
                     delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
+                    repack_last_dist(last_dist, rep);
                 } else {
                     dist  = rc_decode(&s->rc, &s->pm_lsb); // See Note 1
                     dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
@@ -699,8 +808,8 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
                 }
             }
             assert(sqz_min_len <= len && len <= sqz_max_len);
-            last_dist[len] <<= 16;
-            last_dist[len]  |= (uint16_t)dist;
+            last_dist <<= 16;
+            last_dist  |= (uint16_t)dist;
             dist++;
             after = i - dist + len;
             if (s->rc.error == 0) {

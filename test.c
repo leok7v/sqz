@@ -58,6 +58,33 @@ static void print_ascii_or_hex(const uint8_t* s, const size_t n) {
     printf("\n");
 }
 
+static const char* esc(const void* a, size_t n) {
+    static int ix;
+    static char text[16][2 * 1024];
+    const char* s = (const char*)a;
+    char* d = text[ix];
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\r') {
+            d[j++] = '\\';
+            d[j++] = 'r';
+        } else if (s[i] == '\n') {
+            d[j++] = '\\';
+            d[j++] = 'n';
+        } else if (0x20 <= s[i] && s[i] <= 0x7F) {
+            d[j++] = s[i];
+        } else {
+            d[j++] = '\\';
+            d[j++] = 'x';
+            d[j++] = "0123456789ABCDEF"[(((uint8_t)s[i]) / 16) & 0xF];
+            d[j++] = "0123456789ABCDEF"[((uint8_t)s[i]) % 16];
+        }
+    }
+    d[j] = 0;
+    ix = (ix + 1) % countof(text);
+    return d;
+}
+
 static double entropy(uint64_t* freq, size_t n) { // Shannon entropy
     double total = 0;
     for (size_t i = 0; i < n; i++) {
@@ -555,7 +582,7 @@ int main(int argc, const char* argv[]) {
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int),
             sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
-#if 1
+#if 0
     if (r == 0) { r = test_case_1(); }
     if (r == 0) { r = test_case_2(); }
     if (r == 0) { r = test_case_3(); }
@@ -588,12 +615,12 @@ int main(int argc, const char* argv[]) {
 //  if (r == 0) { r = test_hello(); }
 //  if (r == 0) { r = test_short(); }
 //  if (r == 0) { r = test_long(); }
-    if (r == 0) { r = test_file(__FILE__); } // test.c source code:
-    if (r == 0) { r = test_file("test/bible.txt"); }
-//  if (r == 0) { r = test_file("test/arm64.elf"); }
+//  if (r == 0) { r = test_file(__FILE__); } // test.c source code:
+//  if (r == 0) { r = test_file("test/bible.txt"); }
 //  if (r == 0) { r = test_file("test/hhgttg.txt"); }
+//  if (r == 0) { r = test_file("test/arm64.elf"); }
 //  if (r == 0) { r = test_file("test/corpus/mozilla.tar"); }
-//  if (r == 0) { r = test_file("test/silesia.tar"); }
+    if (r == 0) { r = test_file("test/silesia.tar"); }
 #endif
     return r;
 }

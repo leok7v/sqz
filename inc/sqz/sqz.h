@@ -49,22 +49,17 @@ struct map {
     uint64_t     m; // mask 0xFFFFFF for 3 bytes and 0xFFFFFFFFu for 4 bytes
 };
 
-struct tree {
-    const uint8_t* p;
-    struct tree* pn; // parent
-    struct tree* ld; // left descendant
-    struct tree* rd; // right descendant
-};
-
 struct sqz {
     struct range_coder rc; // must be first field for callbacks
     void*  that;    // convenience for caller i/o override
     void*  padding; // padding for 32-bit compilers with 8 bytes alignment
     struct prob_model  pm_bit0; // 0..1
     struct prob_model  pm_byte; // single byte
-    struct prob_model  pm_tag;  // 0..7 (len << 1) or rep (for len <= 4)
+    struct prob_model  pm_tag;  // 0..15 (len-1) << 2|tiny << 1|rep for len <= 4
     struct prob_model  pm_dist; // 0..255 len:2 distance probability model
-    struct prob_model  pm_rep;  // 0..3 last repeated distance index
+    struct prob_model  pm_rep;  // 0..3  last repeated distance index
+    struct prob_model  pm_lix;  // 0..15 tiny length   index
+    struct prob_model  pm_dix;  // 0..15 tiny distance index
     struct prob_model  pm_len;  // len: 5..255
     struct prob_model  pm_lsb;  // 0..255 distance least significant byte
     struct prob_model  pm_msb;  // 0..255 distance most  significant byte
@@ -75,6 +70,9 @@ struct sqz {
     size_t     map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes
     // entries for the maps (75% occupancy):
     void* map_e[6][sqz_max_window + sqz_max_window / 2];
+    // stats
+    uint64_t freq2[1u << (sizeof(uint16_t) * 8)];
+    uint64_t freq3[1u << 24];
 };
 
 // TODO: we need better range coder callback to remove this ugly requirement
