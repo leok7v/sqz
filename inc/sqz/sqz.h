@@ -79,8 +79,6 @@ static_assert(offsetof(struct sqz, rc) == 0);
 extern "C" {
 #endif
 
-extern bool sqz_debug;
-
 void     sqz_init(struct sqz* s);
 void     sqz_compress(struct sqz* s, const void* d, size_t b, uint32_t window);
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t bytes);

@@ -1,7 +1,5 @@
 #include "sqz/sqz.h"
 
-#include "rt/ustd.h" // Only for debugging convinient. TODO: remove me
-
 #ifndef assert // allows to overide assert in single header lib
 #include <assert.h>
 #endif
@@ -9,31 +7,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _MSC_VER // overzealous /Wall in cl.exe compiler:
-#pragma warning(disable: 4710) // '...': function not inlined
-#pragma warning(disable: 4711) // function '...' selected for automatic inline expansion
-#pragma warning(disable: 5045) // Compiler will insert Spectre mitigation
-#endif
+static_assert(sizeof(int) >= 4, "32 bits minimum");
 
-static_assert(sizeof(int) >= 4, "32 bits minimum"); // 16 bit int unsupported
-
-#ifndef countof
-#define countof(a) (sizeof(a) / sizeof((a)[0]))
+#ifndef countof // C32 version of (sizeof(a) / sizeof((a)[0]))
+#define countof(a) (sizeof(a) / \
+    (_Generic(&(a), typeof(*a)**: 0, default: 1) ? sizeof((a)[0]) : 0))
 #endif
 
 enum { sqz_min_len =   2 };
 enum { sqz_max_len = 254 };
 enum { sqz_max_len2_dist = 0xFF };
 
-// must be power of 2 - 1:
-static_assert(((sqz_max_len2_dist + 1) & sqz_max_len2_dist) == 0, "");
+static_assert(((sqz_max_len2_dist + 1) & sqz_max_len2_dist) == 0, "power of 2");
 
-// must fit into 8 bits:
-static_assert(sqz_max_len2_dist <= 0xFF, "");
-
-bool sqz_debug;
-
-#define sqz_trace(...) do { if (sqz_debug) { printf(__VA_ARGS__); } } while (0)
+static_assert(sqz_max_len2_dist <= 0xFF, "must fit into 8 bits");
 
 static void map_init(struct map* m, void** p, size_t n, size_t b) {
     assert(16 < n && n <= (1u << 24) && 3 <= b && b <= 8);
@@ -49,7 +36,7 @@ static void map_init(struct map* m, void** p, size_t n, size_t b) {
 }
 
 static inline uint64_t map_hash_key(uint64_t k) {
-    k ^= k >> 33; // Bob Jenkins' hash (modified for 64-bit keys)
+    k ^= k >> 33; // Bob Jenkins' hash
     k *= 0xFF51AFD7ED558CCDu;
     k ^= k >> 33;
     k *= 0xC4CEB9FE1A85EC53u;
@@ -288,33 +275,6 @@ static void sqz_init_compress(struct sqz* s) {
     }
 }
 
-static const char* esc(const void* a, size_t n) {
-    static int ix;
-    static char text[16][2 * 1024];
-    const char* s = (const char*)a;
-    char* d = text[ix];
-    size_t j = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (s[i] == '\r') {
-            d[j++] = '\\';
-            d[j++] = 'r';
-        } else if (s[i] == '\n') {
-            d[j++] = '\\';
-            d[j++] = 'n';
-        } else if (0x20 <= s[i] && s[i] <= 0x7F) {
-            d[j++] = s[i];
-        } else {
-            d[j++] = '\\';
-            d[j++] = 'x';
-            d[j++] = "0123456789ABCDEF"[(((uint8_t)s[i]) / 16) & 0xF];
-            d[j++] = "0123456789ABCDEF"[((uint8_t)s[i]) % 16];
-        }
-    }
-    d[j] = 0;
-    ix = (ix + 1) % countof(text);
-    return d;
-}
-
 static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
                        const size_t w, const size_t i, uint64_t incoming,
                        uint64_t leaving) {
@@ -360,40 +320,6 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
         s->map2[incoming & 0xFFFFu] = i + 1;
     }
 }
-
-#define LZ_COMPARE_LINEAR
-#undef  LZ_COMPARE_LINEAR
-
-#ifdef LZ_COMPARE_LINEAR
-
-static void lz_linear(const uint8_t* in, const size_t n,
-                      const size_t w, const size_t i,
-                      size_t *ml, size_t *md) {
-    assert(*ml == 0); // caller's responsibility
-    assert(*md == 0);
-    if (1 <= i && i < n - 8) {
-        size_t len = 0;
-        size_t dst = 0;
-        size_t j = i - 1;
-        size_t min_j = i >= w ? i - w : 0;
-        for (;;) {
-            size_t max_k = n - i > sqz_max_len ? sqz_max_len : n - i;
-            size_t k = 0;
-            while (k < max_k && in[j + k] == in[i + k]) { k++; }
-            if (k >= 2 && k > len) {
-                len = k;
-                dst = i - j;
-                if (len == sqz_max_len) { break; }
-            }
-            if (j == min_j) { break; }
-            j--;
-        }
-        *ml = len;
-        *md = dst;
-    }
-}
-
-#endif
 
 // lz_find() function finds longest match at a shortest distance and returns
 // ml: [2..max_len] inclusive
@@ -480,27 +406,6 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
     }                                                                 \
 } while (0)
 
-// delta coding: delta >= 7 will code XOR with next byte `after` last match
-
-static const uint8_t sqz_lit[12]   = {0, 0, 0, 0, 1, 2, 3, 4,  5,  6,   4,  5};
-static const uint8_t sqz_match[12] = {7, 7, 7, 7, 7, 7, 7, 10, 10, 10, 10, 10};
-static const uint8_t sqz_rep[12]   = {8, 8, 8, 8, 8, 8, 8, 11, 11, 11, 11, 11};
-static const uint8_t sqz_short[12] = {9, 9, 9, 9, 9, 9, 9, 11, 11, 11, 11, 11};
-
-
-struct freq_entry {
-    size_t index;
-    uint64_t freq;
-};
-
-static int compare_freq(const void* a, const void* b) {
-    const struct freq_entry* fa = (const struct freq_entry*)a;
-    const struct freq_entry* fb = (const struct freq_entry*)b;
-    if (fa->freq < fb->freq) return 1;
-    if (fa->freq > fb->freq) return -1;
-    return 0;
-}
-
 void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (n > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
@@ -508,8 +413,6 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         return;
     }
     sqz_init_compress(s);
-    uint8_t  delta   = 5; // >= 7 use XOR delta predictor
-    size_t   after   = 0; // index of first byte after last match
     uint64_t last_dist = 0;
     const uint8_t* in = (const uint8_t*)memory;
     assert(sqz_min_window <= w && w <= sqz_max_window);
@@ -517,7 +420,6 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
         const uint8_t literal = 1;
         rc_encode(&s->rc, &s->pm_bit0, literal);
         rc_encode(&s->rc, &s->pm_byte, in[0]);
-        delta = sqz_lit[delta];
     }
     uint64_t incoming = *(uint64_t*)in;
     uint64_t leaving = incoming;
@@ -528,15 +430,8 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     while (i < n8) {
         size_t len = 0;
         size_t dst = 0;
-//      if (i == 54) { rt_breakpoint(); }
         sqz_find(s, in, n, w, i, incoming, &len, &dst);
         assert(dst == 0 || 1 <= dst && dst <= UINT16_MAX + 1);
-        #ifdef LZ_COMPARE_LINEAR
-            size_t lin_len = 0;
-            size_t lin_dst = 0;
-            lz_linear(in, n, w, i, &lin_len, &lin_dst);
-            swear(lin_len == len && lin_dst == dst);
-        #endif
         int rep = -1;
         if (len > 0) {
             if (dst - 1 == ((last_dist >>  0) & 0xFFFF)) { rep = 0; }
@@ -545,47 +440,35 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
             if (dst - 1 == ((last_dist >> 48) & 0xFFFF)) { rep = 3; }
         }
         const uint8_t too_far = len == 2 && rep < 0 && dst > sqz_max_len2_dist;
-//      if (rep >= 0 && dst > 0xFF) { printf("rep: %d len: %5zd   dist: %5zd prev_chain: %zd\n", rep, len, dst - 1, prev_last); }
         const uint8_t literal = len == 0 || too_far;
         rc_encode(&((s)->rc), &((s)->pm_bit0), literal);
         if (literal) { // encode literal byte
             len = 0;
             uint8_t c = (uint8_t)incoming;
-            if (delta >= 7 && after) {
-                c ^= in[after]; after = 0;
-            }
             rc_encode(&((s)->rc), &((s)->pm_byte), c);
-            delta = sqz_lit[delta];
         } else {
-            after = i - dst + len;
-after = 0;
             dst--; // [0..UINT16_MAX]
             if (len <= 4) {
                 rc_encode(&s->rc, &s->pm_tag, ((uint8_t)(len - 1)) << 1 | (rep >= 0));
                 if (rep >= 0) {
                     rc_encode(&s->rc, &s->pm_rep, (uint8_t)rep);
-                    delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
                 } else if (len == 2) {
                     assert(dst <= UINT8_MAX);
                     rc_encode(&s->rc, &s->pm_dist, (uint8_t)dst);
-                    delta = sqz_match[delta];
                 } else {
                     assert(dst <= UINT16_MAX);
                     rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dst & 0xFF));
                     rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dst >> 8));
-                    delta = sqz_match[delta];
                 }
             } else {
                 rc_encode(&s->rc, &s->pm_tag, rep >= 0);
                 rc_encode(&s->rc, &s->pm_len, (uint8_t)len);
                 if (rep >= 0) {
                     rc_encode(&s->rc, &s->pm_rep, (uint8_t)rep);
-                    delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
                 } else {
                     assert(dst <= UINT16_MAX);
                     rc_encode(&s->rc, &s->pm_lsb, (uint8_t)(dst & 0xFF));
                     rc_encode(&s->rc, &s->pm_msb, (uint8_t)(dst >> 8));
-                    delta = sqz_match[delta];
                 }
             }
             last_dist <<= 16;
@@ -597,10 +480,8 @@ after = 0;
         const uint8_t literal = 1;
         rc_encode(&((s)->rc), &((s)->pm_bit0), literal);
         uint8_t c = (uint8_t)in[i];
-        if (delta >= 7 && after) { c ^= in[after]; after = 0; }
         rc_encode(&((s)->rc), &((s)->pm_byte), c);
         i++;
-        delta = sqz_lit[delta];
     }
     const uint8_t literal = 0;
     rc_encode(&((s)->rc), &((s)->pm_bit0), literal);
@@ -614,8 +495,6 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
     for (size_t i = 0; i < sizeof(s->rc.code); i++) {
         s->rc.code = (s->rc.code << 8) + s->rc.read(&s->rc);
     }
-    uint8_t  delta   = 5; // >= 7 use XOR delta predictor
-    size_t   after   = 0; // index of first byte after last match
     uint64_t last_dist = 0;
     uint8_t* d = (uint8_t*)data;
     size_t i = 0;
@@ -624,13 +503,7 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
         if (s->rc.error != 0) { break; }
         if (literal) {
             if (i < n) {
-                uint8_t c = rc_decode(&s->rc, &s->pm_byte);
-                // TODO: dump XOR results and eyeball them in respect of the input arguments
-                if (delta >= 7 && after) {
-                    c ^= d[after]; after = 0;
-                }
-                d[i++] = c;
-                delta = sqz_lit[delta];
+                d[i++] = rc_decode(&s->rc, &s->pm_byte);
             } else {
                 s->rc.error = ENOBUFS;
             }
@@ -642,10 +515,8 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
                 if (tag & 1) {
                     uint8_t rep = rc_decode(&s->rc, &s->pm_rep);
                     dist = (uint32_t)(last_dist >> (rep * 16)) & 0xFFFF;
-                    delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
                 } else {
                     dist = rc_decode(&s->rc, &s->pm_dist);
-                    delta = sqz_match[delta];
                 }
             } else {
                 if (len == 1) {
@@ -655,19 +526,17 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
                 if (tag & 1) {
                     uint8_t rep = rc_decode(&s->rc, &s->pm_rep);
                     dist = (uint32_t)(last_dist >> (rep * 16)) & 0xFFFF;
-                    delta = rep == 0 ? sqz_short[delta] : sqz_rep[delta];
                 } else {
-                    dist  = rc_decode(&s->rc, &s->pm_lsb); // See Note 1
+                    // In C, the arguments to the bitwise OR operator (|)
+                    // are evaluated in an unspecified order:
+                    dist  = rc_decode(&s->rc, &s->pm_lsb);
                     dist |= (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
-                    delta = sqz_match[delta];
                 }
             }
             assert(sqz_min_len <= len && len <= sqz_max_len);
             last_dist <<= 16;
             last_dist  |= (uint16_t)dist;
             dist++;
-            after = i - dist + len;
-after = 0;
             if (s->rc.error == 0) {
                 const size_t next_i = i + len;
                 if (i < dist) {
@@ -685,40 +554,3 @@ after = 0;
     }
     return i;
 }
-
-// Note 1:
-// In C, the arguments to the bitwise OR operator (|) are evaluated
-// in an unspecified order, meaning the compiler is free to evaluate
-// the left-hand or right-hand operand first. This behavior can lead
-// to issues if the two operands have side effects that depend on a
-// specific order of evaluation.
-//    dist  = rc_decode(&s->rc, &s->pm_lsb)
-//         |  (((uint16_t)rc_decode(&s->rc, &s->pm_msb)) << 8);
-// may not work and it did not in x86 release.
-
-// Note 2:
-// "funny xor thing" in
-// https://cbloomrants.blogspot.com/2014/06/06-12-14-some-lzma-notes.html
-// https://cbloomrants.blogspot.com/2010/08/08-20-10-deobfuscating-lzma.html
-// without XOR:
-// 4,436,173   -> 1,343,976    30.30% of "bible.txt"
-// pm_byte[ 80]: 4.33 bits  32.70%   9.24%    229,608
-// with XOR:
-// 4,436,173   -> 1,366,965    30.81% of "bible.txt"
-// pm_byte[148]: 6.01 bits  32.70%  12.62%    229,608
-
-// Note 3:
-// https://cbloomrants.blogspot.com/2008/10/10-01-08-first-look-at-lzma.html
-// https://cbloomrants.blogspot.com/2010/08/08-20-10-deobfuscating-lzma.html
-// https://cbloomrants.blogspot.com/2012/10/10-02-12-small-note-on-lzham.html
-// https://cbloomrants.blogspot.com/2014/06/06-12-14-some-lzma-notes.html
-// https://cbloomrants.blogspot.com/2014/06/06-16-14-rep0-exclusion-in-lzma-like.html
-// https://cbloomrants.blogspot.com/2016/06/06-09-16-fundamentals-of-modern-lz-two.html
-// https://cbloomrants.blogspot.com/2017/07/09-27-08-2.html
-// https://cbloomrants.blogspot.com/2015/01/01-23-15-lza-new-optimal-parse.html
-
-// Note 4:
-// W/O XOR:
-// 211,087,360 -> 69,640,627   32.99% bps: 2.6 of "silesia.tar"
-// WITH XOR (delta after and ^):
-// 211,087,360 -> 69,577,759   32.96% bps: 2.6 of "silesia.tar"

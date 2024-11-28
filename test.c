@@ -2,8 +2,6 @@
 #include "rt/fileio.h"
 #include "sqz/sqz.h"
 
-// TODO: compress to memory not a file
-
 enum { window_bits = 16 };
 
 // window_bits = 16:
@@ -14,7 +12,7 @@ enum { window_bits = 16 };
 // 7z:
 // -> 1,052,529 23.72%
 
-// Tests are limited to "size_t" and "int" precision
+enum { output_max = 1024 * 1024 * 1024 }; // 1GB
 
 static const char* thousands(uint64_t value) {
     static char text[32][64];
@@ -58,9 +56,10 @@ static void print_ascii_or_hex(const uint8_t* s, const size_t n) {
     printf("\n");
 }
 
-static const char* esc(const void* a, size_t n) {
+const char* esc(const void* a, size_t n) {
     static int ix;
     static char text[16][2 * 1024];
+    assert(n < countof(text[0]) / 4);
     const char* s = (const char*)a;
     char* d = text[ix];
     size_t j = 0;
@@ -175,23 +174,23 @@ static void put(struct range_coder* rc, uint8_t b) {
     }
 }
 
-static errno_t compress(const char* from, const char* to,
-                        const uint8_t* data, size_t bytes,
+static struct io compressed;
+
+static errno_t compress(const char* from, const uint8_t* data, size_t bytes,
                         uint32_t window, bool quiet) {
     uint64_t dt = 0; // elapsed time in nanoseconds;
-    struct io out = {0}; // compressed file
-    io_create(&out, to);
-    if (out.error != 0) {
-        printf("Failed to create \"%s\": %s\n", to, strerror(out.error));
-        return out.error;
+    io_alloc(&compressed, bytes * 2 + 128); // header
+    if (compressed.error != 0) {
+        printf("Failed to allocate %zd bytes: %s\n", bytes * 2, strerror(compressed.error));
+        return compressed.error;
     }
     static struct sqz encoder; // static for testing, can be heap malloc()-ed
-    encoder.that = &out;
+    encoder.that = &compressed;
     encoder.rc.write = put;
     sqz_init(&encoder);
-    write_header(&out, bytes);
+    write_header(&compressed, bytes);
     if (encoder.rc.error != 0) {
-        printf("io_create(\"%s\") failed: %s\n", to, strerror(encoder.rc.error));
+        printf("write_header() failed: %s\n", strerror(encoder.rc.error));
     } else {
         uint64_t t = nanoseconds();
         sqz_compress(&encoder, data, bytes, window);
@@ -201,24 +200,19 @@ static errno_t compress(const char* from, const char* to,
         }
         swear(encoder.rc.error == 0);
     }
-    io_close(&out); // error flushing buffered output
-    if (encoder.rc.error == 0 && out.error != 0) {
-        printf("io_close(\"%s\") failed: %s\n", to, strerror(out.error));
-        encoder.rc.error = out.error;
-    }
     if (encoder.rc.error == 0 && !quiet) {
-        dump_entropy(&encoder, bytes, out.written);
+        dump_entropy(&encoder, bytes, compressed.written);
         char* fn = from == null ? null : strrchr(from, '\\'); // basename
         if (fn == null) { fn = from == null ? null : strrchr(from, '/'); }
         if (fn != null) { fn++; } else { fn = (char*)from; }
-        double pc  = out.written * 100.0 / bytes; // percent
-        double bps = out.written * 8.0   / bytes; // bits per symbol
+        double pc  = compressed.written * 100.0 / bytes; // percent
+        double bps = compressed.written * 8.0   / bytes; // bits per symbol
         if (from != null) {
             printf("%-11s -> %-11s %6.2f%% bps: %.1f of \"%s\"\n",
-                  thousands(bytes), thousands(out.written), pc, bps, fn);
+                  thousands(bytes), thousands(compressed.written), pc, bps, fn);
         } else {
             printf("%-11s -> %-11s %6.2f%% bps: %.1f\n",
-                  thousands(bytes), thousands(out.written), pc, bps);
+                  thousands(bytes), thousands(compressed.written), pc, bps);
         }
         printf("compress   time: %6.3fs ", dt / 1.0e9);
         printf("bitrate: %.1f MiB/s\n", bytes / (dt / 1.0e9) / (1024 * 1024));
@@ -246,25 +240,18 @@ static uint8_t get(struct range_coder* rc) {
     return b;
 }
 
-static errno_t verify(const char* fn, const uint8_t* input, size_t size,
-                      bool quiet) {
+static errno_t verify(const uint8_t* input, size_t size, bool quiet) {
     // decompress and compare
-    struct io in = {0}; // compressed file
-    io_open(&in, fn);
-    if (in.error != 0) {
-        printf("Failed to open \"%s\"\n", fn);
-        return in.error;
-    }
     uint64_t bytes = 0;
     static struct sqz decoder; // static to avoid >64KB stack warning
     sqz_init(&decoder);
-    decoder.that = &in;
+    decoder.that = &compressed;
     decoder.rc.read = get;
-    read_header(&in, &bytes);
-    if (in.error != 0) {
-        printf("Failed to read header from \"%s\"\n", fn);
-        io_close(&in); // was opened for reading, close will not fail
-        decoder.rc.error = in.error;
+    read_header(&compressed, &bytes);
+    if (compressed.error != 0) {
+        printf("Failed to read header\n", strerror(compressed.error));
+        io_close(&compressed);
+        decoder.rc.error = compressed.error;
     } else if (bytes > SIZE_MAX) {
         printf("File too large to decompress\n");
         decoder.rc.error = EFBIG;
@@ -303,8 +290,11 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size,
                 // ENODATA is not original posix error; it is OpenGroup error
                 decoder.rc.error = ENODATA; // or EIO
             }
-//          printf("%.*s\n", (int)size, input);
-//          printf("%.*s\n", (int)size, out.data);
+            if (!same) {
+                size_t truncated = size > 128 ? 128 : size;
+                printf("%s\n", esc(input, truncated));
+                printf("%s\n", esc(out.data, truncated));
+            }
             swear(same); // to trigger breakpoint while debugging
         } else {
             swear(decoder.rc.error == 0);
@@ -317,21 +307,18 @@ static errno_t verify(const char* fn, const uint8_t* input, size_t size,
         }
     }
     io_close(&out);
-    io_close(&in);
+    io_close(&compressed);
     return out.error;
 }
-
-const char* compressed = "~compressed~.bin";
 
 static uint64_t seed = 1;
 
 static errno_t compress_and_verify(const char* fn, const
         uint8_t* data, size_t bytes, uint32_t window, bool quiet) {
-    errno_t r = compress(fn, compressed, data, bytes, window, quiet);
+    errno_t r = compress(fn, data, bytes, window, quiet);
     if (r == 0) {
-        r = verify(compressed, data, bytes, quiet);
+        r = verify(data, bytes, quiet);
     }
-    (void)remove(compressed);
     return r;
 }
 
@@ -420,25 +407,19 @@ static errno_t test_long(void) {
             d[start + i] = 0x20 + (base + i) % (128 - 32);
         }
     }
-sqz_debug = true;
     return test(__func__, d, sizeof(d));
 }
 
 static errno_t debug_in_window(const char* name, const char* s, uint32_t w) {
     size_t n = strlen(s);
-    sqz_debug = true;
     dump_string_input(s);
     const uint8_t* d = (const uint8_t*)s;
     errno_t r = 0;
-    r = compress_and_verify(name, d, n, w, !sqz_debug);
-    sqz_debug = false;
+    r = compress_and_verify(name, d, n, w, false);
     return r;
 }
 
-static errno_t test_case_1(void) { // good!
-//  const char* s = "ABCD1.ABCD2,ABCD3;ABCD4:ABCD5`ABCD6#ABCD7%ABCD8_ABCD9-"
-//                  "ABCDo.ABCDn,ABCDk;ABCDj:ABCDi`ABCDh#ABCDg%ABCDf_ABCDe-"
-//                  "ABCD1.ABCD2,ABCD1;ABCD2:ABCD3`ABCD2#ABCD1%ABCD0_ABCDx-";
+static errno_t test_case_1(void) {
     const char* s =
         "ABCD1,0,ABCD1+1+ABCD1+2_ABCD1_1_abcd1_4-ABCD1+5_1234";
     //   012345678901234567890123456789012345678901234567890123456789012
@@ -509,9 +490,8 @@ static errno_t test_permutations(void) {
         }
         d[countof(d) - 1] = 0;
         size_t n = strlen((const char*)d);
-        sqz_debug = j == 3;
-        if (sqz_debug) { dump_string_input((const char*)d); }
-        r = compress_and_verify(__func__, d, n, 32, !sqz_debug);
+//      if (sqz_debug) { dump_string_input((const char*)d); }
+        r = compress_and_verify(__func__, d, n, 32, true);
     }
     return r;
 }
@@ -596,7 +576,7 @@ int main(int argc, const char* argv[]) {
             window_bits, 1u << window_bits, sizeof(size_t), sizeof(int),
             sizeof(long), sizeof(long long));
     errno_t r = locate_test_folder();
-#if 0
+#if 1
     if (r == 0) { r = test_case_1(); }
     if (r == 0) { r = test_case_2(); }
     if (r == 0) { r = test_case_3(); }
@@ -632,7 +612,7 @@ int main(int argc, const char* argv[]) {
 //  if (r == 0) { r = test_long(); }
 //  if (r == 0) { r = test_16_repeats(); }
 //  if (r == 0) { r = test_file(__FILE__); } // test.c source code:
-    if (r == 0) { r = test_file("test/bible.txt"); }
+//  if (r == 0) { r = test_file("test/bible.txt"); }
 //  if (r == 0) { r = test_file("test/hhgttg.txt"); }
 //  if (r == 0) { r = test_file("test/arm64.elf"); }
 //  if (r == 0) { r = test_file("test/corpus/mozilla.tar"); }

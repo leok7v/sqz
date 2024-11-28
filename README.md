@@ -1,15 +1,12 @@
 # Squeeze
 
-zip like LZ77 + Huffman + Deflate compression
+Very simple LZ77 + Range Coder compression
 
 ### Based on:
 
 https://en.wikipedia.org/wiki/LZ77_and_LZ78
-
 https://en.wikipedia.org/wiki/Adaptive_Huffman_coding
-
 https://en.wikipedia.org/wiki/Deflate
-
 https://en.wikipedia.org/wiki/Header-only
 https://github.com/nothings/single_file_libs
 
@@ -22,19 +19,11 @@ https://github.com/nothings/single_file_libs
 
 ### No goals:
 
-* Performance (both CPU and memory).
+* Performance and bitrate (CPU and memory).
 * Existing archivers compatibility.
 * Stream to stream encoding decoding.
-* 16 and 32 bit CPU architectures.
-
-### Lose ends:
-
-* * attic/map.h does not improve compression (needs range coding)
-* map still can be used inside the window to speed up LZ77 search
-* Average number of extra bits for position (aka distance) is rather
-  high in the test materials 6.9 .. 7.9. Maybe possible to change
-  position Huffman table to be bigger than 5 bits to reduce number
-  of extra bits even without doing range encoding.
+* 16 bit CPU architectures.
+* Beating LZMA (state and XOR delta encoding, prefilters etc)
 
 ### Code layout:
 
@@ -44,85 +33,9 @@ https://github.com/nothings/single_file_libs
 
 ### Algorithm Overview:
 
-The `sqz` interface operates as a custom DEFLATE compression method, 
-primarily relying on Huffman coding and LZ77 compression techniques. 
-Here's a detailed breakdown of the core operations and data model:
-
-### Data Model:
-- **Huffman Trees**:
-  - `sqz` maintains two Huffman trees: one for literals/lengths (`lit`)
-    and one for positions (`pos`). These trees are dynamically adjusted during
-    compression and decompression.
-  - Literal bytes (0-255) are represented as literal symbols, and the lengths
-    (3-258) are assigned to symbols 257-285. A special "NYT" (Not Yet 
-    Transmitted) symbol is used to handle newly encountered literals/positions.
-
-- **LZ77 Backreferences**:
-  - The compressor finds repeating patterns (length/distance pairs) in the 
-    input stream and uses backreferences to encode them efficiently.
-  - The distance for each backreference is encoded using the `pos` Huffman tree, 
-    while the length is encoded using the `lit` Huffman tree.
-
-### Key Methods:
-
-#### 1. **Huffman Tree Operations**:
-  - **`huffman_init`**: Initializes a Huffman tree with a predefined
-    set of nodes. It ensures the tree starts in a balanced state where
-    symbols are assigned equal frequencies.
-  - **`huffman_insert`**: When a symbol (literal or length/position) is
-    encountered for the first time, it is inserted into the Huffman tree,
-    causing the tree to rebalance itself. This insertion involves potentially
-    swapping siblings, adjusting tree paths, and recalculating symbol 
-    frequencies.
-  - **`huffman_inc_frequency`**: Updates the frequency of a symbol and 
-    rebalances the Huffman tree accordingly. If a leaf node has a frequency 
-    higher than its sibling, it may get promoted in the tree.
-
-#### 2. **Compression Workflow**:
-  - **`sqz_compress`**: 
-    - This method iterates over the input data. For each byte or sequence
-      of bytes, it checks for backreferences to previous data within 
-      a defined window (up to 32 KB).
-    - If a backreference is found, the length and position are encoded 
-      using the corresponding Huffman trees. If no backreference is found, 
-      the byte is encoded as a literal.
-    - After encoding, the Huffman trees are updated to reflect the increased 
-      frequency of the symbol.
-  
-  - **`sqz_write_huffman`**: Writes the Huffman-encoded value of a symbol
-    to the output bitstream. After writing, it calls `huffman_inc_frequency` 
-    to update the Huffman tree's structure.
-
-#### 3. **Decompression Workflow**:
-  - **`sqz_decompress`**: Reverses the compression process. It reads 
-    literals and backreferences from the bitstream, using the Huffman trees 
-    to decode the values. The decoded data is then used to reconstruct 
-    the original input stream.
-  
-  - **`sqz_read_huffman`**: Reads a symbol from the bitstream, 
-    following the Huffman tree structure. It returns the decoded symbol, 
-    which can be either a literal byte or a length/position pair.
-
-#### 4. **Bitstream Handling**:
-  - **`sqz_write_bit`/`sqz_write_bits`**: These functions write
-    individual bits or groups of bits to the bitstream. Compression
-    algorithms often deal with partial byte data, so writing bits is
-    essential to ensure the bitstream is packed efficiently.
-  
-  - **`sqz_flush`**: Ensures that any pending bits in the bitstream
-    are flushed to the output file or buffer.
-
-### Huffman Encoding/Decoding:
-- The `sqz_len_base` and `sqz_pos_base` arrays hold predefined
-  base values for lengths and positions, respectively. These base values
-  are combined with extra bits (stored in `sqz_len_xb` and
-  `sqz_pos_xb`) to represent the full range of possible
-  lengths and positions.
-- When encoding a length or position, the compressor first writes the 
-  corresponding Huffman code and then appends the extra bits required 
-  to fully specify the value.
-- Similarly, during decompression, the decoder reads the Huffman code 
-  and any extra bits to reconstruct the full length or position value.
+The `sqz` operates as a map dictionaries optimized LZ77 search with
+not matched bytes and length distance backreferences encoded by range 
+coder.
 
 ### Error Handling:
 - The `error` field in the `sqz_type` struct is used to track any 
@@ -132,11 +45,11 @@ Here's a detailed breakdown of the core operations and data model:
 
 ### Theory of Operation Summary:
 The `sqz` interface provides an adaptive compression algorithm 
-that dynamically adjusts its Huffman trees based on the input data. 
+that dynamically adjusts its probability models based on the input data. 
 It uses LZ77 to find repeating patterns in the data and encodes 
-them efficiently using backreferences. Huffman encoding is used to 
+them efficiently using backreferences. Range coding is used to 
 represent both literal bytes and length/position pairs compactly. 
-By updating the Huffman trees as data is processed, the compressor 
+By updating the probability models as data is processed, the compressor 
 adapts to the characteristics of the input data, ensuring that 
 commonly occurring symbols are represented with fewer bits.
 
@@ -167,12 +80,13 @@ the Guttenberg License wording is stripped from the text files.
 
 * See downloads.bat
 
-### Further development
+### References:
 
-* Analise histograms of the back references (lengths and positions)
-  to see if it is possible to come up with better encoding.
-  See ""Bible-Study.md" in this repo.
-* Replace Huffman with Ranger Coder: 
-  https://chatgpt.com/share/66f1c9d3-43dc-8003-abbe-70d669e84a46
-* Restore map dictionary to address large distance back references
-  up to 2^15 even for smaller window.
+* https://cbloomrants.blogspot.com/2008/10/10-01-08-first-look-at-lzma.html
+* https://cbloomrants.blogspot.com/2010/08/08-20-10-deobfuscating-lzma.html
+* https://cbloomrants.blogspot.com/2012/10/10-02-12-small-note-on-lzham.html
+* https://cbloomrants.blogspot.com/2014/06/06-12-14-some-lzma-notes.html
+* https://cbloomrants.blogspot.com/2014/06/06-16-14-rep0-exclusion-in-lzma-like.html
+* https://cbloomrants.blogspot.com/2016/06/06-09-16-fundamentals-of-modern-lz-two.html
+* https://cbloomrants.blogspot.com/2017/07/09-27-08-2.html
+* https://cbloomrants.blogspot.com/2015/01/01-23-15-lza-new-optimal-parse.html
