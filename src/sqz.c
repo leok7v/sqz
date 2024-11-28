@@ -364,8 +364,9 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
 }
 
 static uint64_t prev_sum;
-static uint64_t prev_count;
+static size_t   prev_count;
 static size_t   prev_max;
+static size_t   prev_last;
 
 static uint64_t sqz_debug_ix = UINT64_MAX; // nothing
 // static uint64_t sqz_debug_ix = 0; // everything
@@ -435,6 +436,7 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
                 // simple average iterations of the following while loop
                 // on "silesia.tar" is ~154 upto ~430 on test_long (random)
                 size_t prev_chain = 0;
+int no_improve = 0;
                 for (;;) {
                     if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
                         size_t ln = len + 1;
@@ -445,28 +447,42 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
                     size_t k = 8; // because first 8 bytes are the same
                     while (k < max_k && in[p + k] == in[i + k]) { k++; }
                     if (k > len) {
+if (8 < len && len < 24 && no_improve > 500 && incoming != 0) {
+//  printf("len: %5zd := %5zd dist: %5zd := %5zd chain: %5d no improve: %5d \"%s\" \"%s\"\n", len, k, dst, i - p,prev_chain, no_improve, esc(in + i, len), esc(in + p, k));
+}
                         len = k;
                         dst = i - p;
                         if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
                             sqz_trace("len: %zu, dst: %zu \"%.*s\"\n", len, dst, (int)len, in + i);
                         }
-                        if (len == sqz_max_len) { break; }
+                        if (len == max_k) { break; }
+                        no_improve = 0;
                     } else {
                         if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
                             sqz_trace("\n");
                         }
+                        no_improve++;
                     }
                     size_t d = s->prev[p & (w - 1)];
                     if (d == 0) { break; }
                     p -= d;
+if (prev_chain > 200 && (p + w < i)) {
+//  printf("len: %5zd dist: %5zd chain: %3d no improve: %d \"%s\" \"%s\"\n", len, dst, prev_chain, no_improve, esc(in + i, len), esc(in + p + d, len));
+}
                     // p < i - w won't work because unsigned i - w for i < w
                     if (p + w < i) { break; } // unsigned version of: p < i - w
                     prev_chain++;
+//                  if (prev_chain > 100 && no_improve > 10) { break; }
                 }
                 if (prev_chain > 0) {
                     prev_sum += prev_chain;
                     prev_count++;
-                    if (prev_chain > prev_max) { prev_max = prev_chain; }
+                    prev_last = prev_chain;
+                    if (prev_chain > prev_max) {
+                        prev_max = prev_chain;
+//                      printf("prev_max: %zd len: %zd dist: %zd\n", prev_max, len, dst);
+//                      if (prev_max == 301) { rt_breakpoint(); }
+                    }
                 }
             }
         } else if (len == 0) {
@@ -596,6 +612,7 @@ void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     // TODO: preprocessing delta filter with subtract or maybe a + 128 - b
 prev_sum = 0;
 prev_max = 0;
+prev_last = 0;
 prev_count = 0;
 sqz_debug = sqz_debug_ix < UINT64_MAX;
     sqz_init_compress(s);
@@ -636,6 +653,7 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
             if (dst - 1 == ((last_dist >> 48) & 0xFFFF)) { rep = 3; }
         }
         const uint8_t too_far = len == 2 && rep < 0 && dst > sqz_max_len2_dist;
+//      if (rep >= 0 && dst > 0xFF) { printf("rep: %d len: %5zd   dist: %5zd prev_chain: %zd\n", rep, len, dst - 1, prev_last); }
         const uint8_t literal = len == 0 || too_far;
         rc_encode(&((s)->rc), &((s)->pm_bit0), literal);
         if (literal) { // encode literal byte
@@ -697,12 +715,12 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
     rc_encode(&s->rc, &s->pm_tag, 0b00);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
+    freq2(s, n);
+    freq3(s, n);
     if (prev_count > 0 && prev_max > 1) {
         printf("prev[] simple avg: %.1f max: %2zu\n",
                (double)prev_sum / prev_count, prev_max);
     }
-    freq2(s, n);
-    freq3(s, n);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
