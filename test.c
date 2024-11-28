@@ -630,9 +630,9 @@ int main(int argc, const char* argv[]) {
 //  if (r == 0) { r = test_hello(); }
 //  if (r == 0) { r = test_short(); }
 //  if (r == 0) { r = test_long(); }
-    if (r == 0) { r = test_16_repeats(); }
+//  if (r == 0) { r = test_16_repeats(); }
 //  if (r == 0) { r = test_file(__FILE__); } // test.c source code:
-//  if (r == 0) { r = test_file("test/bible.txt"); }
+    if (r == 0) { r = test_file("test/bible.txt"); }
 //  if (r == 0) { r = test_file("test/hhgttg.txt"); }
 //  if (r == 0) { r = test_file("test/arm64.elf"); }
 //  if (r == 0) { r = test_file("test/corpus/mozilla.tar"); }

@@ -70,9 +70,6 @@ struct sqz {
     size_t     map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes
     // entries for the maps (75% occupancy):
     void* map_e[6][sqz_max_window + sqz_max_window / 2];
-    // stats
-    uint64_t freq2[1u << (sizeof(uint16_t) * 8)];
-    uint64_t freq3[1u << 24];
 };
 
 // TODO: we need better range coder callback to remove this ugly requirement
@@ -388,8 +385,6 @@ void sqz_init(struct sqz* s) {
 static void sqz_init_compress(struct sqz* s) {
     memset(s->prev,   0, sizeof(s->prev));
     memset(s->map2,   0, sizeof(s->map2));
-    memset(s->freq2,  0, sizeof(s->freq2));
-    memset(s->freq3,  0, sizeof(s->freq3));
     for (size_t j = 0; j < countof(s->maps); j++) {
         map_init(&s->maps[j], s->map_e[j], countof(s->map_e[j]), j + 3);
     }
@@ -468,14 +463,6 @@ static void sqz_insert(struct sqz* s, const uint8_t* in, const size_t n,
     }
 }
 
-static uint64_t prev_sum;
-static uint64_t prev_count;
-static size_t   prev_max;
-
-static uint64_t sqz_debug_ix = UINT64_MAX; // nothing
-// static uint64_t sqz_debug_ix = 0; // everything
-// static uint64_t sqz_debug_ix = 54; // specific
-
 #define LZ_COMPARE_LINEAR
 #undef  LZ_COMPARE_LINEAR
 
@@ -532,66 +519,33 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
             if (map_get(m, i64, map_hash(m, i64), &ix)) {
                 const uint8_t* mp = (const uint8_t*)m->p[ix];
                 size_t p = mp - in;
-                if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
-                    sqz_trace("[%2zd] found in: \"%s\" map%d: \"%s\"\n", i, esc(in + i, 8), j, esc(mp, 8));
-                }
                 len = 8;
                 dst = i - p;
-                // simple average iterations of the following while loop
-                // on "silesia.tar" is ~154 upto ~430 on test_long (random)
-                size_t prev_chain = 0;
                 for (;;) {
-                    if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
-                        size_t ln = len + 1;
-                        if (ln > 16) { ln = 16; }
-                        sqz_trace("[%2zu] p: %2zu \"%.*s\" \"%.*s\" len: %2zu ",
-                            i, p, (int)len + 1, in + i, (int)ln, esc(mp, ln), len);
-                    }
                     size_t k = 8; // because first 8 bytes are the same
                     while (k < max_k && in[p + k] == in[i + k]) { k++; }
                     if (k > len) {
                         len = k;
                         dst = i - p;
-                        if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
-                            sqz_trace("len: %zu, dst: %zu \"%.*s\"\n", len, dst, (int)len, in + i);
-                        }
-                        if (len == sqz_max_len) { break; }
-                    } else {
-                        if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
-                            sqz_trace("\n");
-                        }
+                        if (len == max_k) { break; }
                     }
                     size_t d = s->prev[p & (w - 1)];
                     if (d == 0) { break; }
                     p -= d;
                     // p < i - w won't work because unsigned i - w for i < w
                     if (p + w < i) { break; } // unsigned version of: p < i - w
-                    prev_chain++;
-                }
-                if (prev_chain > 0) {
-                    prev_sum += prev_chain;
-                    prev_count++;
-                    if (prev_chain > prev_max) { prev_max = prev_chain; }
                 }
             }
         } else if (len == 0) {
             if (map_get(m, i64 & m->m, map_hash(m, i64 & m->m), &ix)) {
                 const uint8_t* mp = (const uint8_t*)m->p[ix];
                 const size_t p = mp - in;
-                if (sqz_debug_ix == 0 || sqz_debug_ix == i) {
-                    sqz_trace("[%2zd] found in: \"%s\" map%d: \"%s\"\n", i, in + i, j, esc(mp, 8));
-                }
                 if (i - p <= w) {
                     len = j;
                     dst = i - p;
                 }
             }
         }
-
-        if (j == 3 && len == 3) {
-            s->freq3[incoming & 0xFFFFFFu]++;
-        }
-
     }
     if (len == 0) {
         size_t p = s->map2[incoming & 0xFFFFu];
@@ -600,7 +554,6 @@ static inline void sqz_find(struct sqz* s, const uint8_t* in, const size_t n,
             if (i - p <= w) {
                 len = 2;
                 dst = i - p;
-                s->freq2[incoming & 0xFFFFu]++;
             }
         }
     }
@@ -650,59 +603,12 @@ static int compare_freq(const void* a, const void* b) {
     return 0;
 }
 
-static void freq2(struct sqz* s, size_t n) {
-    static struct freq_entry sorted[countof(s->freq2)];
-    size_t sorted_count = 0;
-    uint64_t total = 0;
-    uint64_t cumulative = 0;
-    for (size_t i = 0; i < countof(s->freq2); i++) {
-        if (s->freq2[i] > 0) {
-            total += s->freq2[i];
-            sorted[sorted_count++] = (struct freq_entry){ .index = i, .freq = s->freq2[i] };
-        }
-    }
-    printf("FREQ2: %5.2f%% of %zd non-zero: %zd\n", 100.0 * 2 * total / n, n, sorted_count);
-    qsort(sorted, sorted_count, sizeof(struct freq_entry), compare_freq);
-    for (size_t i = 0; i < sorted_count && i < 16; i++) {
-        cumulative += sorted[i].freq;
-        printf("0x%04X, %10lld %5.2f%% %5.2f%%\n",
-               sorted[i].index, sorted[i].freq,
-               100.0 * 2 * sorted[i].freq / total, 100.0 * 2 * cumulative / n);
-    }
-}
-
-static void freq3(struct sqz* s, size_t n) {
-    static struct freq_entry sorted[countof(s->freq3)];
-    size_t sorted_count = 0;
-    uint64_t total = 0;
-    for (size_t i = 0; i < countof(s->freq3); i++) {
-        if (s->freq3[i] > 0) {
-            total += s->freq3[i];
-            sorted[sorted_count++] = (struct freq_entry){ .index = i, .freq = s->freq3[i] };
-        }
-    }
-    printf("FREQ3 %5.2f%% of %zd non-zero: %zd\n", 100.0 * 3 * total / n, n, sorted_count);
-    qsort(sorted, sorted_count, sizeof(struct freq_entry), compare_freq);
-    uint64_t cumulative = 0;
-    for (size_t i = 0; i < sorted_count && i < 16; i++) {
-        cumulative += sorted[i].freq;
-        printf("0x%06X, %10lld %5.2f%% %5.2f%%\n",
-               sorted[i].index, sorted[i].freq,
-               100.0 * 3 * sorted[i].freq / n, 100.0 * 3 * cumulative / n);
-    }
-}
-
 void sqz_compress(struct sqz* s, const void* memory, size_t n, uint32_t w) {
     static_assert(sizeof(size_t) == 4 || sizeof(size_t) == 8, "32|64 only");
     if (n > (uint64_t)INT32_MAX && sizeof(size_t) == 4) {
         s->rc.error = E2BIG;
         return;
     }
-    // TODO: preprocessing delta filter with subtract or maybe a + 128 - b
-prev_sum = 0;
-prev_max = 0;
-prev_count = 0;
-sqz_debug = sqz_debug_ix < UINT64_MAX;
     sqz_init_compress(s);
     uint8_t  delta   = 5; // >= 7 use XOR delta predictor
     size_t   after   = 0; // index of first byte after last match
@@ -741,16 +647,20 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
             if (dst - 1 == ((last_dist >> 48) & 0xFFFF)) { rep = 3; }
         }
         const uint8_t too_far = len == 2 && rep < 0 && dst > sqz_max_len2_dist;
+//      if (rep >= 0 && dst > 0xFF) { printf("rep: %d len: %5zd   dist: %5zd prev_chain: %zd\n", rep, len, dst - 1, prev_last); }
         const uint8_t literal = len == 0 || too_far;
         rc_encode(&((s)->rc), &((s)->pm_bit0), literal);
         if (literal) { // encode literal byte
             len = 0;
             uint8_t c = (uint8_t)incoming;
-            if (delta >= 7 && after) { c ^= in[after]; after = 0; }
+            if (delta >= 7 && after) {
+                c ^= in[after]; after = 0;
+            }
             rc_encode(&((s)->rc), &((s)->pm_byte), c);
             delta = sqz_lit[delta];
         } else {
             after = i - dst + len;
+after = 0;
             dst--; // [0..UINT16_MAX]
             if (len <= 4) {
                 rc_encode(&s->rc, &s->pm_tag, ((uint8_t)(len - 1)) << 1 | (rep >= 0));
@@ -782,9 +692,6 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
             }
             last_dist <<= 16;
             last_dist |= (uint16_t)dst;
-            if (rep >= 0) {
-                // TODO: bring rep to the front of the queue
-            }
         }
         sqz_insert_next(s, in, n8, w, i, len, incoming, leaving);
     }
@@ -802,12 +709,6 @@ sqz_debug = sqz_debug_ix < UINT64_MAX;
     rc_encode(&s->rc, &s->pm_tag, 0b00);
     rc_encode(&s->rc, &s->pm_len, 0xFF);
     rc_flush(&s->rc);
-    if (prev_count > 0 && prev_max > 1) {
-        printf("prev[] simple avg: %.1f max: %2zu\n",
-               (double)prev_sum / prev_count, prev_max);
-    }
-    freq2(s, n);
-    freq3(s, n);
 }
 
 uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
@@ -827,7 +728,9 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
             if (i < n) {
                 uint8_t c = rc_decode(&s->rc, &s->pm_byte);
                 // TODO: dump XOR results and eyeball them in respect of the input arguments
-                if (delta >= 7 && after) { c ^= d[after]; after = 0; }
+                if (delta >= 7 && after) {
+                    c ^= d[after]; after = 0;
+                }
                 d[i++] = c;
                 delta = sqz_lit[delta];
             } else {
@@ -866,6 +769,7 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
             last_dist  |= (uint16_t)dist;
             dist++;
             after = i - dist + len;
+after = 0;
             if (s->rc.error == 0) {
                 const size_t next_i = i + len;
                 if (i < dist) {
@@ -915,8 +819,11 @@ uint64_t sqz_decompress(struct sqz* s, void* data, size_t n) {
 // https://cbloomrants.blogspot.com/2017/07/09-27-08-2.html
 // https://cbloomrants.blogspot.com/2015/01/01-23-15-lza-new-optimal-parse.html
 
-// TODO:
-// prev[] can be a balanced tree (will it speed up?)
+// Note 4:
+// W/O XOR:
+// 211,087,360 -> 69,640,627   32.99% bps: 2.6 of "silesia.tar"
+// WITH XOR (delta after and ^):
+// 211,087,360 -> 69,577,759   32.96% bps: 2.6 of "silesia.tar"
 
 #endif // sqz_implementation
 

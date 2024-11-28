@@ -70,9 +70,6 @@ struct sqz {
     size_t     map2[1u << (sizeof(uint16_t) * 8)]; // `i` + 1 of 2 bytes
     // entries for the maps (75% occupancy):
     void* map_e[6][sqz_max_window + sqz_max_window / 2];
-    // stats
-    uint64_t freq2[1u << (sizeof(uint16_t) * 8)];
-    uint64_t freq3[1u << 24];
 };
 
 // TODO: we need better range coder callback to remove this ugly requirement
